@@ -1,0 +1,1 @@
+"""Persian Telegram evaluation bot."""
