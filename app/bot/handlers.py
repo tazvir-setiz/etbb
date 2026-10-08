@@ -24,9 +24,15 @@ def build_router(session_factory: async_sessionmaker, settings: Settings) -> Rou
     async def start(message: Message) -> None:
         is_admin = message.from_user.id in settings.admin_ids
         async with session_factory() as session:
-            user = await session.scalar(select(User).where(User.telegram_id == message.from_user.id))
+            user = await session.scalar(
+                select(User).where(
+                    User.platform == settings.bot_platform,
+                    User.platform_user_id == message.from_user.id,
+                )
+            )
             if user is None:
-                session.add(User(telegram_id=message.from_user.id, full_name=message.from_user.full_name,
+                session.add(User(platform=settings.bot_platform, platform_user_id=message.from_user.id,
+                                full_name=message.from_user.full_name,
                                 username=message.from_user.username, is_admin=is_admin))
             else:
                 user.full_name = message.from_user.full_name
@@ -89,17 +95,22 @@ def build_router(session_factory: async_sessionmaker, settings: Settings) -> Rou
                 await callback.message.answer("اگر مایلید، نظر خود را بنویسید. برای رد کردن /skip را بفرستید.")
                 await callback.answer()
                 return
-        await save_vote(callback, state, session_factory, None)
+        await save_vote(callback, state, session_factory, settings.bot_platform, None)
 
     @router.message(VoteFlow.comment)
     async def save_comment(message: Message, state: FSMContext) -> None:
         comment = None if message.text == "/skip" else (message.text or "")[:2000]
-        await save_vote(message, state, session_factory, comment)
+        await save_vote(message, state, session_factory, settings.bot_platform, comment)
 
     @router.message(F.text == "📊 امتیازهای من")
     async def my_votes(message: Message) -> None:
         async with session_factory() as session:
-            user = await session.scalar(select(User).where(User.telegram_id == message.from_user.id))
+            user = await session.scalar(
+                select(User).where(
+                    User.platform == settings.bot_platform,
+                    User.platform_user_id == message.from_user.id,
+                )
+            )
             if not user:
                 await message.answer("هنوز امتیازی ثبت نکرده‌اید.")
                 return
@@ -213,12 +224,14 @@ def build_router(session_factory: async_sessionmaker, settings: Settings) -> Rou
     return router
 
 
-async def save_vote(update: Message | CallbackQuery, state: FSMContext, session_factory, comment: str | None) -> None:
+async def save_vote(update: Message | CallbackQuery, state: FSMContext, session_factory,
+                    platform: str, comment: str | None) -> None:
     payload = await state.get_data()
-    telegram_id = update.from_user.id
+    platform_user_id = update.from_user.id
     try:
         async with session_factory() as session:
-            await record_vote(session, telegram_id=telegram_id, survey_id=payload["survey_id"],
+            await record_vote(session, platform=platform, platform_user_id=platform_user_id,
+                              survey_id=payload["survey_id"],
                               person_id=payload["person_id"], score=payload["score"], comment=comment)
         response = "امتیاز شما با موفقیت ثبت شد."
     except VotingError as exc:

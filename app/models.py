@@ -1,7 +1,9 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -19,9 +21,13 @@ class SurveyStatus(StrEnum):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("platform", "platform_user_id", name="uq_user_platform_platform_user_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    platform: Mapped[str] = mapped_column(String(16), default="telegram", index=True)
+    platform_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     full_name: Mapped[str] = mapped_column(String(200))
     username: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)

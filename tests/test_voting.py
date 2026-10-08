@@ -35,11 +35,11 @@ async def setup_survey(factory, start_offset=-1, end_offset=1, editing=True):
 async def test_vote_record_and_duplicate_edit(session_factory):
     survey_id, person_id, now = await setup_survey(session_factory)
     async with session_factory() as session:
-        first = await record_vote(session, telegram_id=42, survey_id=survey_id,
+        first = await record_vote(session, platform="telegram", platform_user_id=42, survey_id=survey_id,
                                   person_id=person_id, score=3, now=now)
     assert first.score == 3
     async with session_factory() as session:
-        second = await record_vote(session, telegram_id=42, survey_id=survey_id,
+        second = await record_vote(session, platform="telegram", platform_user_id=42, survey_id=survey_id,
                                    person_id=person_id, score=5, now=now)
     assert second.id == first.id
     assert second.score == 5
@@ -50,8 +50,20 @@ async def test_vote_rejected_outside_window(session_factory):
     survey_id, person_id, now = await setup_survey(session_factory, start_offset=1, end_offset=2)
     async with session_factory() as session:
         with pytest.raises(VotingError, match="فعال نیست"):
-            await record_vote(session, telegram_id=42, survey_id=survey_id,
+            await record_vote(session, platform="telegram", platform_user_id=42, survey_id=survey_id,
                               person_id=person_id, score=3, now=now)
+
+
+@pytest.mark.asyncio
+async def test_same_numeric_user_id_is_distinct_per_platform(session_factory):
+    survey_id, person_id, now = await setup_survey(session_factory)
+    recorded_votes = []
+    for platform in ("telegram", "bale"):
+        async with session_factory() as session:
+            vote = await record_vote(session, platform=platform, platform_user_id=42,
+                                     survey_id=survey_id, person_id=person_id, score=4, now=now)
+            recorded_votes.append(vote.id)
+    assert len(set(recorded_votes)) == 2
 
 
 @pytest.mark.asyncio

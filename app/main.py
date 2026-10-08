@@ -2,6 +2,8 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 
 from app.bot.handlers import build_router
 from app.config import get_settings
@@ -14,7 +16,10 @@ async def main() -> None:
         raise RuntimeError("BOT_TOKEN is required. Copy .env.example to .env and configure it.")
     logging.basicConfig(level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     await initialize_database()
-    bot = Bot(settings.bot_token)
+    session = None
+    if settings.bot_platform == "bale":
+        session = AiohttpSession(api=TelegramAPIServer.from_base("https://tapi.bale.ai"))
+    bot = Bot(settings.bot_token, session=session)
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(SessionFactory, settings))
     try:

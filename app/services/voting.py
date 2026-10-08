@@ -30,7 +30,8 @@ def survey_status(survey: Survey, now: datetime | None = None) -> SurveyStatus:
 async def record_vote(
     session: AsyncSession,
     *,
-    telegram_id: int,
+    platform: str,
+    platform_user_id: int,
     survey_id: int,
     person_id: int,
     score: int,
@@ -51,9 +52,11 @@ async def record_vote(
     )
     if membership is None:
         raise VotingError("این فرد در نظرسنجی انتخاب نشده است.")
-    user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+    user = await session.scalar(
+        select(User).where(User.platform == platform, User.platform_user_id == platform_user_id)
+    )
     if user is None:
-        user = User(telegram_id=telegram_id, full_name="کاربر")
+        user = User(platform=platform, platform_user_id=platform_user_id, full_name="کاربر")
         session.add(user)
         await session.flush()
     existing = await session.scalar(

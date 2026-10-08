@@ -1,6 +1,6 @@
 # Persian Telegram Evaluation Bot
 
-A Persian-language Telegram bot for collecting person-by-person ratings in independent, time-bounded surveys. Python 3.11+, aiogram 3, SQLAlchemy async, SQLite by default (PostgreSQL supported through `DATABASE_URL`), and openpyxl reports.
+A Persian-language bot for collecting person-by-person ratings in independent, time-bounded surveys. Run the same code on Telegram or Bale by setting `BOT_PLATFORM`. Python 3.11+, aiogram 3, SQLAlchemy async, SQLite by default (PostgreSQL supported through `DATABASE_URL`), and openpyxl reports.
 
 ## Features
 
@@ -9,6 +9,7 @@ A Persian-language Telegram bot for collecting person-by-person ratings in indep
 - Application checks plus a database unique constraint preventing a second vote for the same user/person/survey.
 - Admin ID allowlist, basic person and survey creation commands, aggregate statistics, and XLSX exports that omit voter identity for anonymous surveys.
 - Async database models and Docker packaging.
+- One codebase and database schema for Telegram and Bale; platform-scoped user identities.
 
 ## Architecture
 
@@ -30,13 +31,16 @@ Edit `.env`:
 
 | Variable | Required | Purpose |
 |---|---:|---|
-| `BOT_TOKEN` | yes | Token from BotFather |
-| `ADMIN_USER_IDS` | yes for admin commands | Comma-separated Telegram numeric IDs |
+| `BOT_TOKEN` | yes | Token from BotFather or Bale's پدرِ ربات |
+| `BOT_PLATFORM` | no | `telegram` (default) or `bale` |
+| `ADMIN_USER_IDS` | yes for admin commands | Comma-separated numeric IDs on the selected platform |
 | `DATABASE_URL` | no | Defaults to local SQLite; PostgreSQL example: `postgresql+asyncpg://user:pass@host/db` |
 | `TIMEZONE` | no | Default documentation timezone (`Asia/Tehran`) |
 | `LOG_LEVEL` | no | Python logging level, default `INFO` |
 
-Create a bot with [BotFather](https://t.me/BotFather), put the token in `.env`, and get your Telegram numeric user ID from a trusted ID bot. Put that ID in `ADMIN_USER_IDS`. Do not commit `.env`.
+Create a bot with [Telegram BotFather](https://t.me/BotFather) or Bale's [پدرِ ربات](https://ble.ir/botfather). Set `BOT_PLATFORM=telegram` or `BOT_PLATFORM=bale`, then put the matching token in `BOT_TOKEN`. `ADMIN_USER_IDS` must contain numeric user IDs from the selected platform. Do not commit `.env`.
+
+Bale's API closely follows Telegram's Bot API. For Bale, aiogram calls `https://tapi.bale.ai`; handlers and business logic remain the same. Run a separate process with the Bale token/config when switching platforms. Both platforms can use the same database; user identity is keyed by platform and numeric ID.
 
 ## Run
 
@@ -44,7 +48,7 @@ Create a bot with [BotFather](https://t.me/BotFather), put the token in `.env`, 
 python -m app.main
 ```
 
-The schema is created on startup. No migration framework is included yet; back up the database before upgrading a populated deployment.
+The schema is created on startup. Startup also migrates the previous user-ID column to the platform-scoped key. Back up the database before upgrading; a general migration framework is not included yet.
 
 ## Admin commands
 
@@ -82,7 +86,7 @@ An administrator runs `/export <survey-id>`. The XLSX contains summary and indiv
 
 ## Backup and restore
 
-For SQLite, stop the bot and copy the database file. Restore by replacing it while the bot is stopped. For PostgreSQL, use `pg_dump`/`pg_restore`. Keep backups encrypted and access-controlled.
+For SQLite, stop the bot and copy the database file. Restore by replacing it while the bot is stopped. For PostgreSQL, use `pg_dump`/`pg_restore`. Keep backups encrypted and access-controlled. The platform-aware user key changes the schema; back up first; startup automatically migrates the user identity column and unique key.
 
 ## Security and limitations
 

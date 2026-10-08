@@ -13,7 +13,7 @@ async def build_survey_workbook(session: AsyncSession, survey_id: int) -> BytesI
     if survey is None:
         raise ValueError("نظرسنجی پیدا نشد.")
     votes = await session.execute(
-        select(Vote, Person.display_name, User.full_name, User.telegram_id)
+        select(Vote, Person.display_name, User.full_name, User.platform_user_id)
         .join(Person, Person.id == Vote.person_id)
         .join(User, User.id == Vote.user_id)
         .where(Vote.survey_id == survey_id)
@@ -24,13 +24,13 @@ async def build_survey_workbook(session: AsyncSession, survey_id: int) -> BytesI
     summary.title = "خلاصه"
     summary.append(["فرد", "تعداد امتیاز", "میانگین"])
     detail = workbook.create_sheet("امتیازها")
-    detail.append(["فرد", "امتیاز", "نظر", "زمان ثبت"] + ([] if survey.anonymous else ["رأی‌دهنده", "شناسه تلگرام"]))
+    detail.append(["فرد", "امتیاز", "نظر", "زمان ثبت"] + ([] if survey.anonymous else ["رأی‌دهنده", "شناسه کاربر", "پیام‌رسان"]))
     grouped: dict[str, list[int]] = {}
     for vote, person_name, voter_name, voter_id in votes:
         grouped.setdefault(person_name, []).append(vote.score)
         record: list[object] = [person_name, vote.score, vote.comment or "", vote.created_at]
         if not survey.anonymous:
-            record.extend([voter_name, voter_id])
+            record.extend([voter_name, voter_id, vote.user.platform])
         detail.append(record)
     for name, scores in sorted(grouped.items()):
         summary.append([name, len(scores), sum(scores) / len(scores)])
