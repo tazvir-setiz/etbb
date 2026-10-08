@@ -37,6 +37,10 @@ class PersonWizard(StatesGroup):
     search = State()
 
 
+class PersonEditFlow(StatesGroup):
+    value = State()
+
+
 class SurveyWizard(StatesGroup):
     title = State()
     starts_at = State()
@@ -273,6 +277,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     PersonWizard.last_name.state,
                     PersonWizard.description.state,
                 },
+                "person_edit": {PersonEditFlow.value.state},
                 "survey": {
                     SurveyWizard.title.state,
                     SurveyWizard.starts_at.state,
@@ -303,6 +308,19 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     SurveyWizard.ends_at.state: "زمان پایان نظرسنجی را بفرستید:",
                     SurveyWizard.description.state: "توضیح اختیاری نظرسنجی را بفرستید یا /skip را ارسال کنید:",
                 }
+                if draft.step == PersonEditFlow.value.state:
+                    field_names = {
+                        "internal_id": "شناسهٔ داخلی",
+                        "first_name": "نام",
+                        "last_name": "نام خانوادگی",
+                        "description": "توضیح",
+                    }
+                    field = draft.payload.get("field")
+                    if field not in field_names:
+                        await _delete_draft(session_factory, settings, message.from_user.id)
+                        await state.clear()
+                        raise SkipHandler
+                    prompts[draft.step] = f"مقدار تازهٔ {field_names[field]} را بفرستید:"
                 await message.answer(
                     "فرم نیمه‌کاره بازیابی شد. برای لغو /cancel را بفرستید.",
                     reply_markup=admin_menu(),
@@ -501,15 +519,125 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 text += f"\nتوضیح: {person.description}"
             keyboard = inline_options(
                 [
+                    ("✏️ ویرایش نام", f"adm:person:edit:first_name:{person.id}"),
+                    ("✏️ ویرایش نام خانوادگی", f"adm:person:edit:last_name:{person.id}"),
+                    ("🪪 ویرایش شناسه", f"adm:person:edit:internal_id:{person.id}"),
+                    ("📝 ویرایش توضیح", f"adm:person:edit:description:{person.id}"),
                     (
                         "⏸ غیرفعال‌کردن" if person.is_active else "▶️ فعال‌کردن",
                         f"adm:person:toggle:{person.id}",
                     ),
                     ("↩️ بازگشت به فهرست", "adm:people:page:0"),
-                ]
+                ],
+                columns=2,
             )
         await callback.message.edit_text(text, reply_markup=keyboard)
         await callback.answer()
+
+    @router.callback_query(
+        F.data.regexp(r"^adm:person:edit:(internal_id|first_name|last_name|description):\d+$")
+    )
+    async def begin_person_edit(callback: CallbackQuery, state: FSMContext) -> None:
+        if await reject_callback(callback):
+            return
+        _, _, _, field, person_id_text = callback.data.split(":")
+        person_id = int(person_id_text)
+        async with session_factory() as session:
+            person = await session.get(Person, person_id)
+            if not person:
+                await callback.answer("فرد پیدا نشد.", show_alert=True)
+                return
+            current_values = {
+                "internal_id": person.internal_id,
+                "first_name": person.first_name,
+                "last_name": person.last_name,
+                "description": person.description or "ثبت نشده",
+            }
+        field_names = {
+            "internal_id": "شناسهٔ داخلی",
+            "first_name": "نام",
+            "last_name": "نام خانوادگی",
+            "description": "توضیح",
+        }
+        await state.clear()
+        await state.update_data(person_id=person_id, field=field)
+        await state.set_state(PersonEditFlow.value)
+        await _persist_draft(
+            session_factory, settings, callback.from_user.id, state, "person_edit"
+        )
+        prompt = f"مقدار فعلی {field_names[field]}: {current_values[field]}\nمقدار تازه را بفرستید."
+        if field == "description":
+            prompt += " برای پاک‌کردن توضیح /skip را بفرستید."
+        prompt += " برای لغو /cancel را بفرستید."
+        await callback.message.answer(prompt)
+        await callback.answer()
+
+    @router.message(PersonEditFlow.value)
+    async def save_person_edit(message: Message, state: FSMContext) -> None:
+        if await reject_message(message):
+            await state.clear()
+            return
+        data = await state.get_data()
+        field = data["field"]
+        raw_value = (message.text or "").strip()
+        if field == "description" and raw_value == "/skip":
+            value = None
+        elif not raw_value:
+            await message.answer("مقدار نمی‌تواند خالی باشد. دوباره بفرستید:")
+            return
+        elif field == "internal_id" and len(raw_value) > 64:
+            await message.answer("شناسه حداکثر می‌تواند ۶۴ نویسه باشد. دوباره بفرستید:")
+            return
+        elif field in {"first_name", "last_name"} and len(raw_value) > 100:
+            await message.answer("نام حداکثر می‌تواند ۱۰۰ نویسه باشد. دوباره بفرستید:")
+            return
+        elif field == "description" and len(raw_value) > 2000:
+            await message.answer("توضیح حداکثر می‌تواند ۲۰۰۰ نویسه باشد. دوباره بفرستید:")
+            return
+        else:
+            value = raw_value
+
+        async with session_factory() as session:
+            person = await session.get(Person, data["person_id"])
+            if not person:
+                await state.clear()
+                await _delete_draft(session_factory, settings, message.from_user.id)
+                await message.answer("فرد دیگر پیدا نمی‌شود؛ ویرایش لغو شد.")
+                return
+            if field == "internal_id":
+                duplicate = await session.scalar(
+                    select(Person.id).where(
+                        Person.internal_id == value,
+                        Person.id != person.id,
+                    )
+                )
+                if duplicate:
+                    await message.answer("این شناسه قبلاً استفاده شده است. شناسهٔ دیگری بفرستید:")
+                    return
+                person.internal_id = value
+            elif field == "first_name":
+                person.first_name = value
+                person.display_name = f"{person.first_name} {person.last_name}"
+            elif field == "last_name":
+                person.last_name = value
+                person.display_name = f"{person.first_name} {person.last_name}"
+            elif field == "description":
+                person.description = value
+            await session.execute(
+                delete(AdminDraft).where(
+                    AdminDraft.platform == settings.bot_platform,
+                    AdminDraft.platform_user_id == message.from_user.id,
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                await message.answer("ثبت تغییر انجام نشد؛ مقدار شناسه احتمالاً تکراری است.")
+                return
+            display_name = person.display_name
+        await state.clear()
+        await message.answer(f"اطلاعات «{display_name}» به‌روزرسانی شد.", reply_markup=admin_menu())
 
     @router.callback_query(F.data.regexp(r"^adm:person:toggle:\d+$"))
     async def toggle_person(callback: CallbackQuery) -> None:
