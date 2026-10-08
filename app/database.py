@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 
 from alembic import command
@@ -15,4 +14,10 @@ SessionFactory = async_sessionmaker(engine, expire_on_commit=False)
 async def initialize_database() -> None:
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
-    await asyncio.to_thread(command.upgrade, config, "head")
+
+    def upgrade(sync_connection) -> None:
+        config.attributes["connection"] = sync_connection
+        command.upgrade(config, "head")
+
+    async with engine.connect() as connection:
+        await connection.run_sync(upgrade)
