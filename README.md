@@ -17,7 +17,7 @@ A Persian-language bot for collecting person-by-person ratings in independent, t
 
 ## Requirements and installation
 
-Python 3.11 or newer is required. From the repository root:
+Python 3.11 through 3.14 is supported. Use a fresh virtual environment after changing Python versions. From the repository root:
 
 ```bash
 python -m venv .venv
@@ -27,14 +27,16 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env   # PowerShell; on Linux/macOS: cp .env.example .env
 ```
 
-Edit `.env`:
+SQLAlchemy's `asyncio` extra is included so the required `greenlet` dependency is installed for async database connections.
+
+Edit the project-root `.env` file and set `BOT_TOKEN` to the token issued by your chosen platform:
 
 | Variable | Required | Purpose |
 |---|---:|---|
 | `BOT_TOKEN` | yes | Token from BotFather or Bale's پدرِ ربات |
 | `BOT_PLATFORM` | no | `telegram` (default) or `bale` |
 | `ADMIN_USER_IDS` | yes for admin commands | Comma-separated numeric IDs on the selected platform |
-| `DATABASE_URL` | no | Defaults to local SQLite; PostgreSQL example: `postgresql+asyncpg://user:pass@host/db` |
+| `DATABASE_URL` | no | Defaults to local SQLite; PostgreSQL example: `postgresql+psycopg://user:pass@host/db` |
 | `TIMEZONE` | no | Default documentation timezone (`Asia/Tehran`) |
 | `LOG_LEVEL` | no | Python logging level, default `INFO` |
 

@@ -6,14 +6,17 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 
 from app.bot.handlers import build_router
-from app.config import get_settings
+from app.config import ENV_FILE, get_settings
 from app.database import SessionFactory, engine, initialize_database
 
 
 async def main() -> None:
     settings = get_settings()
     if not settings.bot_token:
-        raise RuntimeError("BOT_TOKEN is required. Copy .env.example to .env and configure it.")
+        raise RuntimeError(
+            f"BOT_TOKEN is empty. Put your bot token in {ENV_FILE} "
+            "(copy .env.example first) or set the BOT_TOKEN environment variable."
+        )
     logging.basicConfig(level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     await initialize_database()
     session = None

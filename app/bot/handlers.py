@@ -12,6 +12,7 @@ from app.bot.keyboards import inline_options, main_menu
 from app.exports.excel import build_survey_workbook
 from app.config import Settings
 from app.models import Person, Survey, SurveyPerson, SurveyStatus, User, Vote
+from app.services.users import register_or_update_user
 from app.services.voting import VotingError, record_vote, survey_status, survey_statistics
 
 class VoteFlow(StatesGroup):
@@ -24,21 +25,14 @@ def build_router(session_factory: async_sessionmaker, settings: Settings) -> Rou
     async def start(message: Message) -> None:
         is_admin = message.from_user.id in settings.admin_ids
         async with session_factory() as session:
-            user = await session.scalar(
-                select(User).where(
-                    User.platform == settings.bot_platform,
-                    User.platform_user_id == message.from_user.id,
-                )
+            await register_or_update_user(
+                session,
+                platform=settings.bot_platform,
+                platform_user_id=message.from_user.id,
+                full_name=message.from_user.full_name,
+                username=message.from_user.username,
+                is_admin=is_admin,
             )
-            if user is None:
-                session.add(User(platform=settings.bot_platform, platform_user_id=message.from_user.id,
-                                full_name=message.from_user.full_name,
-                                username=message.from_user.username, is_admin=is_admin))
-            else:
-                user.full_name = message.from_user.full_name
-                user.username = message.from_user.username
-                user.is_admin = is_admin
-            await session.commit()
         await message.answer("سلام! به سامانه ارزیابی خوش آمدید.", reply_markup=main_menu(is_admin))
 
     @router.message(F.text == "📝 نظرسنجی‌های فعال")
@@ -119,6 +113,13 @@ def build_router(session_factory: async_sessionmaker, settings: Settings) -> Rou
                 .where(Vote.user_id == user.id).order_by(Vote.created_at.desc()))).all()
             await message.answer("\n".join(f"{title} — {person}: {score}" for title, person, score in rows)
                                  or "هنوز امتیازی ثبت نکرده‌اید.")
+
+    @router.message(F.text == "ℹ️ راهنما")
+    async def help_message(message: Message) -> None:
+        await message.answer(
+            "از «نظرسنجی‌های فعال» یک نظرسنجی را انتخاب کنید، سپس به افراد امتیاز بدهید. "
+            "برای دیدن امتیازهای ثبت‌شدهٔ خود، «امتیازهای من» را بزنید."
+        )
 
     @router.message(F.text == "⚙️ پنل مدیریت")
     async def admin_panel(message: Message) -> None:
@@ -220,6 +221,14 @@ def build_router(session_factory: async_sessionmaker, settings: Settings) -> Rou
             await message.answer_document(BufferedInputFile(data.read(), filename=f"{safe_name}.xlsx"))
         except (ValueError, IndexError, TypeError):
             await message.answer("قالب درست: /export شناسه")
+
+    @router.callback_query()
+    async def stale_callback(callback: CallbackQuery) -> None:
+        await callback.answer("این دکمه دیگر فعال نیست. از منو دوباره انتخاب کنید.", show_alert=True)
+
+    @router.message()
+    async def unknown_message(message: Message) -> None:
+        await message.answer("این پیام را نمی‌شناسم. از گزینه‌های منو استفاده کنید یا /start را بفرستید.")
 
     return router
 

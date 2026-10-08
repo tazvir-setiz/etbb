@@ -17,7 +17,7 @@
 
 ## پیش‌نیاز و نصب
 
-به Python نسخهٔ ۳٫۱۱ یا جدیدتر نیاز دارید. در پوشهٔ پروژه اجرا کنید:
+نسخه‌های Python 3.11 تا 3.14 پشتیبانی می‌شوند. اگر نسخهٔ Python را عوض می‌کنید، محیط مجازی قبلی را کنار بگذارید و محیط تازه بسازید. در پوشهٔ پروژه اجرا کنید:
 
 ```powershell
 python -m venv .venv
@@ -26,14 +26,16 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-فایل `.env` را ویرایش کنید:
+در فایل وابستگی‌ها افزونهٔ `asyncio` مربوط به SQLAlchemy فعال شده تا `greenlet` لازم برای اتصال async نیز نصب شود.
+
+فایل `.env` در ریشهٔ پروژه را باز کنید و `BOT_TOKEN` را با توکن ربات در پیام‌رسان انتخابی پر کنید:
 
 | متغیر | نیاز | کاربرد |
 |---|---:|---|
 | `BOT_TOKEN` | بله | توکن گرفته‌شده از BotFather تلگرام یا پدرِ ربات بله |
 | `BOT_PLATFORM` | خیر | `telegram` (پیش‌فرض) یا `bale` |
 | `ADMIN_USER_IDS` | برای مدیریت بله | شناسه‌های عددی کاربران در پلتفرم انتخاب‌شده، جداشده با ویرگول |
-| `DATABASE_URL` | خیر | پیش‌فرض پایگاه SQLite محلی؛ برای PostgreSQL از `postgresql+asyncpg://user:pass@host/db` استفاده کنید |
+| `DATABASE_URL` | خیر | پیش‌فرض پایگاه SQLite محلی؛ برای PostgreSQL از `postgresql+psycopg://user:pass@host/db` استفاده کنید |
 | `TIMEZONE` | خیر | منطقهٔ زمانی مستندات، پیش‌فرض `Asia/Tehran` |
 | `LOG_LEVEL` | خیر | سطح ثبت گزارش، پیش‌فرض `INFO` |
 

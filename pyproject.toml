@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "persian-telegram-survey-bot"
 version = "0.1.0"
 description = "Persian Telegram bot for time-windowed people evaluations"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
