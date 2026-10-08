@@ -50,7 +50,7 @@ Bale's API closely follows Telegram's Bot API. For Bale, aiogram calls `https://
 python -m app.main
 ```
 
-The schema is created on startup. Startup also migrates the previous user-ID column to the platform-scoped key. Back up the database before upgrading; a general migration framework is not included yet.
+Alembic migrations run on startup. The initial baseline creates missing tables and adopts the previous Telegram user-ID schema. For an existing database, stop the bot and make a verified backup before the first startup on this version; test the migration against a restored copy first. The baseline cannot be downgraded; restore the verified backup to roll back.
 
 ## Admin commands
 
@@ -63,7 +63,7 @@ Use `/start` first, then open **⚙️ پنل مدیریت**. Commands are restr
 /export 1
 ```
 
-Dates must be ISO-8601 and include a UTC offset. Survey people are database person IDs, shown after insertion in the database. The implementation currently provides create and report operations; edit/delete/toggle flows, full user/admin management, destructive-action confirmations, and settings UI are future work.
+Dates must be ISO-8601; timestamps without an offset use `TIMEZONE`. Survey people are database person IDs. Scheduled surveys without votes can be edited from the admin detail view. Scheduled or active surveys can be cancelled after a separate confirmation; existing votes and reports are retained.
 
 ## Tests and lint
 
@@ -88,7 +88,7 @@ An administrator runs `/export <survey-id>`. The XLSX contains summary and indiv
 
 ## Backup and restore
 
-For SQLite, stop the bot and copy the database file. Restore by replacing it while the bot is stopped. For PostgreSQL, use `pg_dump`/`pg_restore`. Keep backups encrypted and access-controlled. The platform-aware user key changes the schema; back up first; startup automatically migrates the user identity column and unique key.
+For SQLite, stop the bot and copy the database file. Restore by replacing it while the bot is stopped. For PostgreSQL, use `pg_dump`/`pg_restore`. Keep backups encrypted and access-controlled. Startup runs `alembic upgrade head`; test upgrades against a restored copy before using an existing production database. Do not downgrade the initial baseline; restore a verified backup to roll back.
 
 ## Security and limitations
 
