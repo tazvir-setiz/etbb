@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 
-from app.bot.handlers import build_router
+from app.bot.routers import build_router
 from app.config import ENV_FILE, get_settings
 from app.database import SessionFactory, engine, initialize_database
 
