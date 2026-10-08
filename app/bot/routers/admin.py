@@ -14,14 +14,16 @@ from aiogram.types import (
     Message,
 )
 from aiogram.dispatcher.event.bases import SkipHandler
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.bot.keyboards import admin_menu, inline_options, paginated_options, participant_menu
 from app.config import Settings
 from app.exports.excel import build_survey_workbook
-from app.models import Person, Survey, SurveyPerson, SurveyStatus
+from app.models import AdminDraft, Person, Survey, SurveyPerson, SurveyStatus
+from app.services.admin_drafts import delete_admin_draft, get_admin_draft, save_admin_draft
+from app.services.users import register_or_update_user
 from app.services.voting import survey_statistics, survey_status
 
 PAGE_SIZE = 8
@@ -45,6 +47,38 @@ class SurveyWizard(StatesGroup):
 
 def _is_admin(user_id: int, settings: Settings) -> bool:
     return user_id in settings.admin_ids
+
+
+async def _persist_draft(
+    session_factory: async_sessionmaker,
+    settings: Settings,
+    user_id: int,
+    state: FSMContext,
+    draft_type: str,
+) -> None:
+    step = await state.get_state()
+    if step is None:
+        return
+    await save_admin_draft(
+        session_factory,
+        platform=settings.bot_platform,
+        platform_user_id=user_id,
+        draft_type=draft_type,
+        step=step,
+        payload=await state.get_data(),
+    )
+
+
+async def _delete_draft(
+    session_factory: async_sessionmaker,
+    settings: Settings,
+    user_id: int,
+) -> None:
+    await delete_admin_draft(
+        session_factory,
+        platform=settings.bot_platform,
+        platform_user_id=user_id,
+    )
 
 
 def _digits_to_ascii(value: str) -> str:
@@ -218,12 +252,68 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
     async def cancel_flow(message: Message, state: FSMContext) -> None:
         await state.clear()
         is_admin = _is_admin(message.from_user.id, settings)
+        if is_admin:
+            await _delete_draft(session_factory, settings, message.from_user.id)
         await message.answer(
             "روند جاری لغو شد.", reply_markup=admin_menu() if is_admin else participant_menu()
         )
 
     @router.message(CommandStart())
-    async def pass_start_to_user_router(state: FSMContext) -> None:
+    async def pass_start_to_user_router(message: Message, state: FSMContext) -> None:
+        if _is_admin(message.from_user.id, settings):
+            draft = await get_admin_draft(
+                session_factory,
+                platform=settings.bot_platform,
+                platform_user_id=message.from_user.id,
+            )
+            valid_steps = {
+                "person": {
+                    PersonWizard.internal_id.state,
+                    PersonWizard.first_name.state,
+                    PersonWizard.last_name.state,
+                    PersonWizard.description.state,
+                },
+                "survey": {
+                    SurveyWizard.title.state,
+                    SurveyWizard.starts_at.state,
+                    SurveyWizard.ends_at.state,
+                    SurveyWizard.description.state,
+                    SurveyWizard.people.state,
+                },
+            }
+            if draft and draft.step in valid_steps.get(draft.draft_type, set()):
+                async with session_factory() as session:
+                    await register_or_update_user(
+                        session,
+                        platform=settings.bot_platform,
+                        platform_user_id=message.from_user.id,
+                        full_name=message.from_user.full_name,
+                        username=message.from_user.username,
+                        is_admin=True,
+                    )
+                await state.set_state(draft.step)
+                await state.set_data(draft.payload)
+                prompts = {
+                    PersonWizard.internal_id.state: "شناسهٔ داخلی فرد را بفرستید:",
+                    PersonWizard.first_name.state: "نام فرد را بفرستید:",
+                    PersonWizard.last_name.state: "نام خانوادگی را بفرستید:",
+                    PersonWizard.description.state: "توضیح اختیاری را بفرستید یا /skip را ارسال کنید:",
+                    SurveyWizard.title.state: "عنوان نظرسنجی را بفرستید:",
+                    SurveyWizard.starts_at.state: "زمان شروع نظرسنجی را بفرستید:",
+                    SurveyWizard.ends_at.state: "زمان پایان نظرسنجی را بفرستید:",
+                    SurveyWizard.description.state: "توضیح اختیاری نظرسنجی را بفرستید یا /skip را ارسال کنید:",
+                }
+                await message.answer(
+                    "فرم نیمه‌کاره بازیابی شد. برای لغو /cancel را بفرستید.",
+                    reply_markup=admin_menu(),
+                )
+                if draft.step == SurveyWizard.people.state:
+                    await _render_survey_people(message, session_factory, state, page=0)
+                else:
+                    await message.answer(prompts[draft.step])
+                return
+            if draft:
+                await _delete_draft(session_factory, settings, message.from_user.id)
         await state.clear()
         raise SkipHandler
 
@@ -259,6 +349,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.clear()
         await state.set_state(PersonWizard.internal_id)
+        await _persist_draft(
+            session_factory, settings, message.from_user.id, state, "person"
+        )
         await message.answer("شناسهٔ داخلی فرد را بفرستید. برای لغو /cancel را ارسال کنید.")
 
     @router.message(PersonWizard.internal_id)
@@ -272,6 +365,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(internal_id=value)
         await state.set_state(PersonWizard.first_name)
+        await _persist_draft(
+            session_factory, settings, message.from_user.id, state, "person"
+        )
         await message.answer("نام فرد را بفرستید:")
 
     @router.message(PersonWizard.first_name)
@@ -285,6 +381,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(first_name=value)
         await state.set_state(PersonWizard.last_name)
+        await _persist_draft(
+            session_factory, settings, message.from_user.id, state, "person"
+        )
         await message.answer("نام خانوادگی را بفرستید:")
 
     @router.message(PersonWizard.last_name)
@@ -298,6 +397,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(last_name=value)
         await state.set_state(PersonWizard.description)
+        await _persist_draft(
+            session_factory, settings, message.from_user.id, state, "person"
+        )
         await message.answer("توضیح اختیاری را بفرستید یا برای رد کردن /skip را ارسال کنید:")
 
     @router.message(PersonWizard.description)
@@ -322,6 +424,12 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 await message.answer("این شناسه قبلاً ثبت شده است. با /cancel روند را لغو و شناسهٔ دیگری انتخاب کنید.")
                 return
             session.add(person)
+            await session.execute(
+                delete(AdminDraft).where(
+                    AdminDraft.platform == settings.bot_platform,
+                    AdminDraft.platform_user_id == message.from_user.id,
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError:
@@ -338,6 +446,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.clear()
         await state.set_state(PersonWizard.internal_id)
+        await _persist_draft(
+            session_factory, settings, callback.from_user.id, state, "person"
+        )
         await callback.message.answer("شناسهٔ داخلی فرد را بفرستید. برای لغو /cancel را ارسال کنید.")
         await callback.answer()
 
@@ -442,6 +553,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.clear()
         await state.set_state(SurveyWizard.title)
+        await _persist_draft(
+            session_factory, settings, message.from_user.id, state, "survey"
+        )
         await message.answer("عنوان نظرسنجی را بفرستید. برای لغو /cancel را ارسال کنید.")
 
     @router.callback_query(F.data == "adm:surveys:add")
@@ -450,6 +564,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.clear()
         await state.set_state(SurveyWizard.title)
+        await _persist_draft(
+            session_factory, settings, callback.from_user.id, state, "survey"
+        )
         await callback.message.answer("عنوان نظرسنجی را بفرستید. برای لغو /cancel را ارسال کنید.")
         await callback.answer()
 
@@ -464,6 +581,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(title=title)
         await state.set_state(SurveyWizard.starts_at)
+        await _persist_draft(
+            session_factory, settings, message.from_user.id, state, "survey"
+        )
         await message.answer(
             "زمان شروع را بفرستید (مثل 2026-10-08T09:00:00؛ زمان بدون منطقهٔ زمانی، به وقت تنظیم‌شدهٔ ربات است):"
         )
@@ -480,6 +600,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(starts_at=starts_at.isoformat())
         await state.set_state(SurveyWizard.ends_at)
+        await _persist_draft(
+            session_factory, settings, message.from_user.id, state, "survey"
+        )
         await message.answer("زمان پایان را بفرستید:")
 
     @router.message(SurveyWizard.ends_at)
@@ -498,6 +621,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(ends_at=ends_at.isoformat())
         await state.set_state(SurveyWizard.description)
+        await _persist_draft(
+            session_factory, settings, message.from_user.id, state, "survey"
+        )
         await message.answer("توضیح اختیاری نظرسنجی را بفرستید یا /skip را ارسال کنید:")
 
     @router.message(SurveyWizard.description)
@@ -508,6 +634,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         description = None if message.text == "/skip" else (message.text or "").strip()[:4000]
         await state.update_data(description=description, selected_people=[])
         await state.set_state(SurveyWizard.people)
+        await _persist_draft(
+            session_factory, settings, message.from_user.id, state, "survey"
+        )
         await _render_survey_people(message, session_factory, state, page=0)
 
     async def _render_survey_people(
@@ -592,6 +721,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         else:
             selected.add(person_id)
         await state.update_data(selected_people=sorted(selected))
+        await _persist_draft(
+            session_factory, settings, callback.from_user.id, state, "survey"
+        )
         await _render_survey_people(callback, session_factory, state, page=page)
         await callback.answer()
 
@@ -629,6 +761,12 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             await session.flush()
             for person in people:
                 session.add(SurveyPerson(survey_id=survey.id, person_id=person.id))
+            await session.execute(
+                delete(AdminDraft).where(
+                    AdminDraft.platform == settings.bot_platform,
+                    AdminDraft.platform_user_id == callback.from_user.id,
+                )
+            )
             await session.commit()
             survey_id = survey.id
         await state.clear()
@@ -819,6 +957,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         if await reject_callback(callback):
             return
         await state.clear()
+        await _delete_draft(session_factory, settings, callback.from_user.id)
         await callback.message.answer("ساخت نظرسنجی لغو شد.", reply_markup=admin_menu())
         await callback.answer()
 
