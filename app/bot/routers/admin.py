@@ -23,6 +23,7 @@ from app.config import Settings
 from app.exports.excel import build_survey_workbook
 from app.models import AdminDraft, Person, Survey, SurveyPerson, SurveyStatus, Vote
 from app.services.admin_drafts import delete_admin_draft, get_admin_draft, save_admin_draft
+from app.services.people_import import PeopleImportError, parse_people_file
 from app.services.users import register_or_update_user
 from app.services.voting import survey_statistics, survey_status
 
@@ -39,6 +40,10 @@ class PersonWizard(StatesGroup):
 
 class PersonEditFlow(StatesGroup):
     value = State()
+
+
+class PersonBulkFlow(StatesGroup):
+    confirm = State()
 
 
 class SurveyWizard(StatesGroup):
@@ -174,16 +179,19 @@ async def _render_people(
     if not people:
         lines.append("فردی پیدا نشد.")
     items = [
-        (_short_label(f"{'🟢' if person.is_active else '⚪'} {person.display_name} · {person.internal_id}"),
-         f"adm:person:{person.id}")
+        (
+            _short_label(
+                f"{'🟢' if person.is_active else '⚪'} {person.display_name} · {person.internal_id}"
+            ),
+            f"adm:person:{person.id}",
+        )
         for person in people
     ]
-    keyboard = paginated_options(
-        items, page=page, page_count=page_count, prefix="adm:people:page"
-    )
+    keyboard = paginated_options(items, page=page, page_count=page_count, prefix="adm:people:page")
     keyboard = _with_footer(
         keyboard,
         ("➕ افزودن فرد", "adm:people:add"),
+        ("📤 ورود گروهی از فایل", "adm:people:import:start"),
         ("🔎 جست‌وجو", "adm:people:search"),
         ("↩️ پنل مدیریت", "adm:home"),
     )
@@ -209,9 +217,7 @@ async def _render_surveys(
             (_short_label(f"{_status_label(survey)} · {survey.title}"), f"adm:survey:{survey.id}")
             for survey in surveys
         ]
-    keyboard = paginated_options(
-        rows, page=page, page_count=page_count, prefix="adm:surveys:page"
-    )
+    keyboard = paginated_options(rows, page=page, page_count=page_count, prefix="adm:surveys:page")
     keyboard = _with_footer(
         keyboard,
         ("➕ ساخت نظرسنجی", "adm:surveys:add"),
@@ -239,9 +245,7 @@ async def _render_reports(
             )
         ).all()
     items = [(_short_label(survey.title), f"adm:report:{survey.id}") for survey in surveys]
-    keyboard = paginated_options(
-        items, page=page, page_count=page_count, prefix="adm:reports:page"
-    )
+    keyboard = paginated_options(items, page=page, page_count=page_count, prefix="adm:reports:page")
     keyboard = _with_footer(keyboard, ("↩️ پنل مدیریت", "adm:home"))
     text = "نظرسنجی موردنظر برای گزارش را انتخاب کنید:"
     if not surveys:
@@ -263,6 +267,39 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return False
         await callback.answer("دسترسی ندارید.", show_alert=True)
         return True
+
+    async def render_people_import(target: Message | CallbackQuery, state: FSMContext) -> None:
+        data = await state.get_data()
+        rows = data.get("import_rows", [])
+        valid = [row for row in rows if not row.get("error")]
+        invalid = [row for row in rows if row.get("error")]
+        page_count = max(1, ceil(len(rows) / 15))
+        page = min(max(int(data.get("import_preview_page", 0)), 0), page_count - 1)
+        page_rows = rows[page * 15 : (page + 1) * 15]
+        lines = [
+            f"پیش‌نمایش ورود گروهی: {len(valid)} ردیف قابل ثبت، {len(invalid)} ردیف نیازمند اصلاح.",
+            "هر ردیف را با وضعیتش بررسی کنید؛ ردیف‌های معتبر با تأیید و در یک تراکنش ثبت می‌شوند.",
+        ]
+        for row in page_rows:
+            if row.get("error"):
+                lines.append(
+                    f"❌ ردیف {row['row']} · {row.get('internal_id') or 'بدون شناسه'}: {row['error']}"
+                )
+            else:
+                lines.append(
+                    f"✅ ردیف {row['row']} · {row['internal_id']} — {row['first_name']} {row['last_name']}"
+                )
+        buttons = []
+        if page_count > 1:
+            if page > 0:
+                buttons.append(("⬅️ ردیف‌های قبلی", f"adm:people:import:page:{page - 1}"))
+            buttons.append((f"صفحه {page + 1}/{page_count}", "noop"))
+            if page + 1 < page_count:
+                buttons.append(("ردیف‌های بعدی ➡️", f"adm:people:import:page:{page + 1}"))
+        if valid:
+            buttons.append((f"✅ ثبت {len(valid)} فرد معتبر", "adm:people:import:confirm"))
+        buttons.append(("❌ لغو ورود گروهی", "adm:people:import:cancel"))
+        await _send_or_edit(target, "\n".join(lines), inline_options(buttons))
 
     @router.message(Command("cancel"))
     async def cancel_flow(message: Message, state: FSMContext) -> None:
@@ -290,6 +327,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     PersonWizard.description.state,
                 },
                 "person_edit": {PersonEditFlow.value.state},
+                "people_import": {PersonBulkFlow.confirm.state},
                 "survey": {
                     SurveyWizard.title.state,
                     SurveyWizard.starts_at.state,
@@ -352,6 +390,13 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     await _render_survey_people(message, session_factory, state, page=0)
                 elif draft.step == SurveyEditFlow.people.state:
                     await _render_survey_edit_people(message, session_factory, state, page=0)
+                elif draft.step == PersonBulkFlow.confirm.state:
+                    if (draft.payload or {}).get("import_rows"):
+                        await render_people_import(message, state)
+                    else:
+                        await message.answer(
+                            "برای ادامه، فایل CSV یا XLSX را به‌صورت پیوست بفرستید."
+                        )
                 else:
                     await message.answer(prompts[draft.step])
                 return
@@ -386,15 +431,157 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         await state.update_data(people_query="")
         await _render_people(message, session_factory)
 
+    @router.callback_query(F.data == "adm:people:import:start")
+    async def begin_people_import(callback: CallbackQuery, state: FSMContext) -> None:
+        if await reject_callback(callback):
+            return
+        await state.clear()
+        await state.set_state(PersonBulkFlow.confirm)
+        await _persist_draft(
+            session_factory, settings, callback.from_user.id, state, "people_import"
+        )
+        await callback.message.answer(
+            "فایل CSV یا XLSX را بفرستید (حداکثر ۵ مگابایت و ۱۰۰۰ ردیف).\n"
+            "ستون‌های لازم: شناسه داخلی، نام، نام خانوادگی؛ ستون توضیح اختیاری است.\n"
+            "نمونهٔ سرستون CSV: شناسه داخلی,نام,نام خانوادگی,توضیح"
+        )
+        await callback.answer()
+
+    @router.message(PersonBulkFlow.confirm, F.document)
+    async def receive_people_import(message: Message, state: FSMContext) -> None:
+        if await reject_message(message):
+            return
+        document = message.document
+        filename = document.file_name or ""
+        if document.file_size and document.file_size > 5 * 1024 * 1024:
+            await message.answer("حجم فایل نباید بیشتر از ۵ مگابایت باشد.")
+            return
+        file = await message.bot.get_file(document.file_id)
+        content = await message.bot.download_file(file.file_path)
+        try:
+            parsed = parse_people_file(filename, content.read())
+        except PeopleImportError as exc:
+            await message.answer(str(exc))
+            return
+        ids = [str(row["internal_id"]) for row in parsed if not row.get("error")]
+        from collections import Counter
+
+        duplicate_ids = {value for value, count in Counter(ids).items() if count > 1}
+        async with session_factory() as session:
+            existing_ids = (
+                set(
+                    await session.scalars(
+                        select(Person.internal_id).where(Person.internal_id.in_(set(ids)))
+                    )
+                )
+                if ids
+                else set()
+            )
+        for row in parsed:
+            if row.get("error"):
+                continue
+            internal_id = str(row["internal_id"])
+            if internal_id in duplicate_ids:
+                row["error"] = "شناسه در خود فایل تکرار شده است"
+            elif internal_id in existing_ids:
+                row["error"] = "این شناسه قبلاً در سامانه ثبت شده است"
+        await state.update_data(import_rows=parsed, import_filename=filename, import_preview_page=0)
+        await _persist_draft(
+            session_factory, settings, message.from_user.id, state, "people_import"
+        )
+        await render_people_import(message, state)
+
+    @router.message(PersonBulkFlow.confirm)
+    async def people_import_expected_file(message: Message) -> None:
+        if await reject_message(message):
+            return
+        await message.answer("برای ادامه، فایل CSV یا XLSX را به‌صورت پیوست بفرستید.")
+
+    @router.callback_query(F.data == "adm:people:import:cancel")
+    async def cancel_people_import(callback: CallbackQuery, state: FSMContext) -> None:
+        if await reject_callback(callback):
+            return
+        await state.clear()
+        await _delete_draft(session_factory, settings, callback.from_user.id)
+        await callback.message.edit_text("ورود گروهی لغو شد.")
+        await callback.answer()
+
+    @router.callback_query(F.data == "adm:people:import:confirm")
+    async def confirm_people_import(callback: CallbackQuery, state: FSMContext) -> None:
+        if await reject_callback(callback):
+            return
+        if await state.get_state() != PersonBulkFlow.confirm.state:
+            await callback.answer("پیش‌نمایش ورود گروهی منقضی شده است.", show_alert=True)
+            return
+        rows = (await state.get_data()).get("import_rows", [])
+        valid_rows = [row for row in rows if not row.get("error")]
+        if not valid_rows:
+            await callback.answer("ردیف معتبری برای ثبت وجود ندارد.", show_alert=True)
+            return
+        ids = [str(row["internal_id"]) for row in valid_rows]
+        try:
+            async with session_factory() as session:
+                existing = set(
+                    await session.scalars(
+                        select(Person.internal_id).where(Person.internal_id.in_(ids))
+                    )
+                )
+                if existing:
+                    await callback.answer(
+                        "یک شناسه پس از پیش‌نمایش ثبت شده؛ فایل را دوباره بررسی کنید.",
+                        show_alert=True,
+                    )
+                    return
+                session.add_all(
+                    [
+                        Person(
+                            internal_id=row["internal_id"],
+                            first_name=row["first_name"],
+                            last_name=row["last_name"],
+                            display_name=f"{row['first_name']} {row['last_name']}",
+                            description=row.get("description"),
+                            is_active=True,
+                        )
+                        for row in valid_rows
+                    ]
+                )
+                await session.execute(
+                    delete(AdminDraft).where(
+                        AdminDraft.platform == settings.bot_platform,
+                        AdminDraft.platform_user_id == callback.from_user.id,
+                    )
+                )
+                await session.commit()
+        except IntegrityError:
+            await callback.answer(
+                "ثبت انجام نشد؛ یکی از شناسه‌ها تکراری شده است. فایل را دوباره بررسی کنید.",
+                show_alert=True,
+            )
+            return
+        await state.clear()
+        await callback.message.edit_text(
+            f"ورود گروهی تمام شد: {len(valid_rows)} فرد ثبت شد و {len(rows) - len(valid_rows)} ردیف نامعتبر ثبت نشد."
+        )
+        await callback.answer("ثبت شد")
+
+    @router.callback_query(F.data.regexp(r"^adm:people:import:page:\d+$"))
+    async def people_import_page(callback: CallbackQuery, state: FSMContext) -> None:
+        if await reject_callback(callback):
+            return
+        if await state.get_state() != PersonBulkFlow.confirm.state:
+            await callback.answer("پیش‌نمایش منقضی شده است.", show_alert=True)
+            return
+        await state.update_data(import_preview_page=int(callback.data.rsplit(":", 1)[1]))
+        await render_people_import(callback, state)
+        await callback.answer()
+
     @router.message(F.text == "➕ افزودن فرد")
     async def begin_person_wizard(message: Message, state: FSMContext) -> None:
         if await reject_message(message):
             return
         await state.clear()
         await state.set_state(PersonWizard.internal_id)
-        await _persist_draft(
-            session_factory, settings, message.from_user.id, state, "person"
-        )
+        await _persist_draft(session_factory, settings, message.from_user.id, state, "person")
         await message.answer("شناسهٔ داخلی فرد را بفرستید. برای لغو /cancel را ارسال کنید.")
 
     @router.message(PersonWizard.internal_id)
@@ -408,9 +595,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(internal_id=value)
         await state.set_state(PersonWizard.first_name)
-        await _persist_draft(
-            session_factory, settings, message.from_user.id, state, "person"
-        )
+        await _persist_draft(session_factory, settings, message.from_user.id, state, "person")
         await message.answer("نام فرد را بفرستید:")
 
     @router.message(PersonWizard.first_name)
@@ -424,9 +609,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(first_name=value)
         await state.set_state(PersonWizard.last_name)
-        await _persist_draft(
-            session_factory, settings, message.from_user.id, state, "person"
-        )
+        await _persist_draft(session_factory, settings, message.from_user.id, state, "person")
         await message.answer("نام خانوادگی را بفرستید:")
 
     @router.message(PersonWizard.last_name)
@@ -440,9 +623,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(last_name=value)
         await state.set_state(PersonWizard.description)
-        await _persist_draft(
-            session_factory, settings, message.from_user.id, state, "person"
-        )
+        await _persist_draft(session_factory, settings, message.from_user.id, state, "person")
         await message.answer("توضیح اختیاری را بفرستید یا برای رد کردن /skip را ارسال کنید:")
 
     @router.message(PersonWizard.description)
@@ -464,7 +645,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 select(Person.id).where(Person.internal_id == person.internal_id)
             )
             if existing:
-                await message.answer("این شناسه قبلاً ثبت شده است. با /cancel روند را لغو و شناسهٔ دیگری انتخاب کنید.")
+                await message.answer(
+                    "این شناسه قبلاً ثبت شده است. با /cancel روند را لغو و شناسهٔ دیگری انتخاب کنید."
+                )
                 return
             session.add(person)
             await session.execute(
@@ -477,7 +660,9 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                await message.answer("این شناسه قبلاً ثبت شده است. روند را با /cancel لغو و دوباره شروع کنید.")
+                await message.answer(
+                    "این شناسه قبلاً ثبت شده است. روند را با /cancel لغو و دوباره شروع کنید."
+                )
                 return
             display_name = person.display_name
         await state.clear()
@@ -489,9 +674,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.clear()
         await state.set_state(PersonWizard.internal_id)
-        await _persist_draft(
-            session_factory, settings, callback.from_user.id, state, "person"
-        )
+        await _persist_draft(session_factory, settings, callback.from_user.id, state, "person")
         await callback.message.answer("شناسهٔ داخلی فرد را بفرستید. برای لغو /cancel را ارسال کنید.")
         await callback.answer()
 
@@ -587,9 +770,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         await state.clear()
         await state.update_data(person_id=person_id, field=field)
         await state.set_state(PersonEditFlow.value)
-        await _persist_draft(
-            session_factory, settings, callback.from_user.id, state, "person_edit"
-        )
+        await _persist_draft(session_factory, settings, callback.from_user.id, state, "person_edit")
         prompt = f"مقدار فعلی {field_names[field]}: {current_values[field]}\nمقدار تازه را بفرستید."
         if field == "description":
             prompt += " برای پاک‌کردن توضیح /skip را بفرستید."
@@ -706,9 +887,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.clear()
         await state.set_state(SurveyWizard.title)
-        await _persist_draft(
-            session_factory, settings, message.from_user.id, state, "survey"
-        )
+        await _persist_draft(session_factory, settings, message.from_user.id, state, "survey")
         await message.answer("عنوان نظرسنجی را بفرستید. برای لغو /cancel را ارسال کنید.")
 
     @router.callback_query(F.data == "adm:surveys:add")
@@ -717,9 +896,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.clear()
         await state.set_state(SurveyWizard.title)
-        await _persist_draft(
-            session_factory, settings, callback.from_user.id, state, "survey"
-        )
+        await _persist_draft(session_factory, settings, callback.from_user.id, state, "survey")
         await callback.message.answer("عنوان نظرسنجی را بفرستید. برای لغو /cancel را ارسال کنید.")
         await callback.answer()
 
@@ -734,9 +911,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(title=title)
         await state.set_state(SurveyWizard.starts_at)
-        await _persist_draft(
-            session_factory, settings, message.from_user.id, state, "survey"
-        )
+        await _persist_draft(session_factory, settings, message.from_user.id, state, "survey")
         await message.answer(
             "زمان شروع را بفرستید (مثل 2026-10-08T09:00:00؛ زمان بدون منطقهٔ زمانی، به وقت تنظیم‌شدهٔ ربات است):"
         )
@@ -753,9 +928,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(starts_at=starts_at.isoformat())
         await state.set_state(SurveyWizard.ends_at)
-        await _persist_draft(
-            session_factory, settings, message.from_user.id, state, "survey"
-        )
+        await _persist_draft(session_factory, settings, message.from_user.id, state, "survey")
         await message.answer("زمان پایان را بفرستید:")
 
     @router.message(SurveyWizard.ends_at)
@@ -774,9 +947,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.update_data(ends_at=ends_at.isoformat())
         await state.set_state(SurveyWizard.description)
-        await _persist_draft(
-            session_factory, settings, message.from_user.id, state, "survey"
-        )
+        await _persist_draft(session_factory, settings, message.from_user.id, state, "survey")
         await message.answer("توضیح اختیاری نظرسنجی را بفرستید یا /skip را ارسال کنید:")
 
     @router.message(SurveyWizard.description)
@@ -787,9 +958,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         description = None if message.text == "/skip" else (message.text or "").strip()[:4000]
         await state.update_data(description=description, selected_people=[])
         await state.set_state(SurveyWizard.people)
-        await _persist_draft(
-            session_factory, settings, message.from_user.id, state, "survey"
-        )
+        await _persist_draft(session_factory, settings, message.from_user.id, state, "survey")
         await _render_survey_people(message, session_factory, state, page=0)
 
     async def _render_survey_people(
@@ -800,9 +969,12 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         page: int,
     ) -> None:
         async with sessions() as session:
-            total = await session.scalar(
-                select(func.count(Person.id)).where(Person.is_active.is_(True))
-            ) or 0
+            total = (
+                await session.scalar(
+                    select(func.count(Person.id)).where(Person.is_active.is_(True))
+                )
+                or 0
+            )
             page_count = max(1, ceil(total / PAGE_SIZE))
             page = min(max(page, 0), page_count - 1)
             people = (
@@ -821,8 +993,10 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             keyboard = inline_options([("↩️ پنل مدیریت", "adm:home")])
         else:
             rows = [
-                (_short_label(f"{'✅' if person.id in selected else '▫️'} {person.display_name}"),
-                 f"adm:survey:pick:{page}:{person.id}")
+                (
+                    _short_label(f"{'✅' if person.id in selected else '▫️'} {person.display_name}"),
+                    f"adm:survey:pick:{page}:{person.id}",
+                )
                 for person in people
             ]
             keyboard = paginated_options(
@@ -852,20 +1026,39 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             total = await session.scalar(select(func.count(Person.id))) or 0
             page_count = max(1, ceil(total / PAGE_SIZE))
             page = min(max(page, 0), page_count - 1)
-            people = (await session.scalars(
-                select(Person).order_by(Person.display_name).offset(page * PAGE_SIZE).limit(PAGE_SIZE)
-            )).all()
+            people = (
+                await session.scalars(
+                    select(Person)
+                    .order_by(Person.display_name)
+                    .offset(page * PAGE_SIZE)
+                    .limit(PAGE_SIZE)
+                )
+            ).all()
         if not people:
             text = "فردی برای انتخاب وجود ندارد."
             keyboard = inline_options([("↩️ جزئیات", f"adm:survey:{data['survey_id']}")])
         else:
-            rows = [(_short_label(f"{'✅' if p.id in selected else '▫️'} {p.display_name}{'' if p.is_active else ' (غیرفعال)'}"),
-                     f"adm:survey:edit:pick:{page}:{p.id}") for p in people]
-            keyboard = paginated_options(rows, page=page, page_count=page_count, prefix="adm:survey:edit:people:page")
-            keyboard = _with_footer(keyboard,
+            rows = [
+                (
+                    _short_label(
+                        f"{'✅' if p.id in selected else '▫️'} {p.display_name}{'' if p.is_active else ' (غیرفعال)'}"
+                    ),
+                    f"adm:survey:edit:pick:{page}:{p.id}",
+                )
+                for p in people
+            ]
+            keyboard = paginated_options(
+                rows, page=page, page_count=page_count, prefix="adm:survey:edit:people:page"
+            )
+            keyboard = _with_footer(
+                keyboard,
                 (f"✅ ذخیرهٔ افراد ({len(selected)})", "adm:survey:edit:finish"),
-                ("❌ لغو ویرایش", "adm:cancel"))
-            text = "افراد نظرسنجی را انتخاب کنید. افراد غیرفعال فقط قابل برداشتن هستند.\n" + f"انتخاب‌شده: {len(selected)}"
+                ("❌ لغو ویرایش", "adm:cancel"),
+            )
+            text = (
+                "افراد نظرسنجی را انتخاب کنید. افراد غیرفعال فقط قابل برداشتن هستند.\n"
+                + f"انتخاب‌شده: {len(selected)}"
+            )
         await _send_or_edit(target, text, keyboard)
 
     async def _survey_for_callback(callback: CallbackQuery, survey_id: int):
@@ -873,35 +1066,57 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             survey = await session.get(Survey, survey_id)
             if survey is None:
                 return None, 0
-            votes = await session.scalar(select(func.count(Vote.id)).where(Vote.survey_id == survey_id)) or 0
+            votes = (
+                await session.scalar(select(func.count(Vote.id)).where(Vote.survey_id == survey_id))
+                or 0
+            )
             return survey, votes
 
     @router.callback_query(F.data.regexp(r"^adm:survey:edit:\d+$"))
     async def begin_survey_edit(callback: CallbackQuery, state: FSMContext) -> None:
-        if await reject_callback(callback): return
+        if await reject_callback(callback):
+            return
         survey_id = int(callback.data.rsplit(":", 1)[1])
         survey, votes = await _survey_for_callback(callback, survey_id)
         if survey is None:
-            await callback.answer("نظرسنجی پیدا نشد.", show_alert=True); return
+            await callback.answer("نظرسنجی پیدا نشد.", show_alert=True)
+            return
         if survey_status(survey) != SurveyStatus.SCHEDULED or votes:
-            await callback.answer("فقط نظرسنجی زمان‌بندی‌شدهٔ بدون رأی قابل ویرایش است.", show_alert=True); return
+            await callback.answer(
+                "فقط نظرسنجی زمان‌بندی‌شدهٔ بدون رأی قابل ویرایش است.", show_alert=True
+            )
+            return
         async with session_factory() as session:
-            selected = list(await session.scalars(select(SurveyPerson.person_id).where(SurveyPerson.survey_id == survey_id)))
+            selected = list(
+                await session.scalars(
+                    select(SurveyPerson.person_id).where(SurveyPerson.survey_id == survey_id)
+                )
+            )
         await state.clear()
-        await state.update_data(survey_id=survey_id, title=survey.title, description=survey.description,
-            starts_at=_as_utc_if_naive(survey.starts_at).isoformat(), ends_at=_as_utc_if_naive(survey.ends_at).isoformat(), selected_people=selected)
+        await state.update_data(
+            survey_id=survey_id,
+            title=survey.title,
+            description=survey.description,
+            starts_at=_as_utc_if_naive(survey.starts_at).isoformat(),
+            ends_at=_as_utc_if_naive(survey.ends_at).isoformat(),
+            selected_people=selected,
+        )
         await state.set_state(SurveyEditFlow.title)
         await _persist_draft(session_factory, settings, callback.from_user.id, state, "survey_edit")
-        await callback.message.answer("عنوان تازه را بفرستید یا /skip را بزنید تا عنوان فعلی بماند:")
+        await callback.message.answer(
+            "عنوان تازه را بفرستید یا /skip را بزنید تا عنوان فعلی بماند:"
+        )
         await callback.answer()
 
     @router.message(SurveyEditFlow.title)
     async def edit_survey_title(message: Message, state: FSMContext) -> None:
-        if await reject_message(message): return
+        if await reject_message(message):
+            return
         value = (message.text or "").strip()
         if value != "/skip":
             if not value or len(value) > 200:
-                await message.answer("عنوان باید بین ۱ تا ۲۰۰ نویسه باشد:"); return
+                await message.answer("عنوان باید بین ۱ تا ۲۰۰ نویسه باشد:")
+                return
             await state.update_data(title=value)
         await state.set_state(SurveyEditFlow.description)
         await _persist_draft(session_factory, settings, message.from_user.id, state, "survey_edit")
@@ -909,11 +1124,15 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
 
     @router.message(SurveyEditFlow.description)
     async def edit_survey_description(message: Message, state: FSMContext) -> None:
-        if await reject_message(message): return
+        if await reject_message(message):
+            return
         value = (message.text or "").strip()
-        if value == "/clear": await state.update_data(description=None)
+        if value == "/clear":
+            await state.update_data(description=None)
         elif value != "/skip":
-            if len(value) > 4000: await message.answer("توضیح حداکثر ۴۰۰۰ نویسه است:"); return
+            if len(value) > 4000:
+                await message.answer("توضیح حداکثر ۴۰۰۰ نویسه است:")
+                return
             await state.update_data(description=value or None)
         await state.set_state(SurveyEditFlow.starts_at)
         await _persist_draft(session_factory, settings, message.from_user.id, state, "survey_edit")
@@ -921,11 +1140,15 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
 
     @router.message(SurveyEditFlow.starts_at)
     async def edit_survey_start(message: Message, state: FSMContext) -> None:
-        if await reject_message(message): return
+        if await reject_message(message):
+            return
         value = (message.text or "").strip()
         if value != "/skip":
-            try: parsed = _parse_datetime(value, settings.timezone)
-            except (ValueError, KeyError): await message.answer("زمان معتبر نیست؛ قالب YYYY-MM-DDTHH:MM:SS:"); return
+            try:
+                parsed = _parse_datetime(value, settings.timezone)
+            except (ValueError, KeyError):
+                await message.answer("زمان معتبر نیست؛ قالب YYYY-MM-DDTHH:MM:SS:")
+                return
             await state.update_data(starts_at=parsed.isoformat())
         await state.set_state(SurveyEditFlow.ends_at)
         await _persist_draft(session_factory, settings, message.from_user.id, state, "survey_edit")
@@ -933,92 +1156,178 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
 
     @router.message(SurveyEditFlow.ends_at)
     async def edit_survey_end(message: Message, state: FSMContext) -> None:
-        if await reject_message(message): return
-        data = await state.get_data(); value = (message.text or "").strip()
+        if await reject_message(message):
+            return
+        data = await state.get_data()
+        value = (message.text or "").strip()
         if value != "/skip":
-            try: parsed = _parse_datetime(value, settings.timezone)
-            except (ValueError, KeyError): await message.answer("زمان معتبر نیست؛ قالب YYYY-MM-DDTHH:MM:SS:"); return
+            try:
+                parsed = _parse_datetime(value, settings.timezone)
+            except (ValueError, KeyError):
+                await message.answer("زمان معتبر نیست؛ قالب YYYY-MM-DDTHH:MM:SS:")
+                return
             await state.update_data(ends_at=parsed.isoformat())
         data = await state.get_data()
         try:
-            start, end = datetime.fromisoformat(data["starts_at"]), datetime.fromisoformat(data["ends_at"])
-            if _as_utc_if_naive(end) <= _as_utc_if_naive(start): raise ValueError
-            if _as_utc_if_naive(start) <= datetime.now(timezone.utc): raise ValueError
+            start, end = (
+                datetime.fromisoformat(data["starts_at"]),
+                datetime.fromisoformat(data["ends_at"]),
+            )
+            if _as_utc_if_naive(end) <= _as_utc_if_naive(start):
+                raise ValueError
+            if _as_utc_if_naive(start) <= datetime.now(timezone.utc):
+                raise ValueError
         except ValueError:
-            await message.answer("بازه باید معتبر باشد و شروع در آینده قرار بگیرد. زمان پایان را دوباره بفرستید یا /skip:"); return
+            await message.answer(
+                "بازه باید معتبر باشد و شروع در آینده قرار بگیرد. زمان پایان را دوباره بفرستید یا /skip:"
+            )
+            return
         await state.set_state(SurveyEditFlow.people)
         await _persist_draft(session_factory, settings, message.from_user.id, state, "survey_edit")
         await _render_survey_edit_people(message, session_factory, state, page=0)
 
     @router.callback_query(F.data.regexp(r"^adm:survey:edit:people:page:\d+$"))
     async def edit_survey_people_page(callback: CallbackQuery, state: FSMContext) -> None:
-        if await reject_callback(callback): return
+        if await reject_callback(callback):
+            return
         if await state.get_state() != SurveyEditFlow.people.state:
-            await callback.answer("فرم ویرایش فعال نیست.", show_alert=True); return
-        await _render_survey_edit_people(callback, session_factory, state, page=int(callback.data.rsplit(":", 1)[1])); await callback.answer()
+            await callback.answer("فرم ویرایش فعال نیست.", show_alert=True)
+            return
+        await _render_survey_edit_people(
+            callback, session_factory, state, page=int(callback.data.rsplit(":", 1)[1])
+        )
+        await callback.answer()
 
     @router.callback_query(F.data.regexp(r"^adm:survey:edit:pick:\d+:\d+$"))
     async def toggle_edit_survey_person(callback: CallbackQuery, state: FSMContext) -> None:
-        if await reject_callback(callback): return
+        if await reject_callback(callback):
+            return
         if await state.get_state() != SurveyEditFlow.people.state:
-            await callback.answer("فرم ویرایش فعال نیست.", show_alert=True); return
-        _, _, _, _, page_text, person_text = callback.data.split(":"); page, person_id = int(page_text), int(person_text)
-        async with session_factory() as session: person = await session.get(Person, person_id)
-        data = await state.get_data(); selected = set(data.get("selected_people", []))
+            await callback.answer("فرم ویرایش فعال نیست.", show_alert=True)
+            return
+        _, _, _, _, page_text, person_text = callback.data.split(":")
+        page, person_id = int(page_text), int(person_text)
+        async with session_factory() as session:
+            person = await session.get(Person, person_id)
+        data = await state.get_data()
+        selected = set(data.get("selected_people", []))
         if person is None or (person_id not in selected and not person.is_active):
-            await callback.answer("فرد فعال نیست و نمی‌توان افزود.", show_alert=True); return
-        if person_id in selected: selected.remove(person_id)
-        else: selected.add(person_id)
+            await callback.answer("فرد فعال نیست و نمی‌توان افزود.", show_alert=True)
+            return
+        if person_id in selected:
+            selected.remove(person_id)
+        else:
+            selected.add(person_id)
         await state.update_data(selected_people=sorted(selected))
         await _persist_draft(session_factory, settings, callback.from_user.id, state, "survey_edit")
-        await _render_survey_edit_people(callback, session_factory, state, page=page); await callback.answer()
+        await _render_survey_edit_people(callback, session_factory, state, page=page)
+        await callback.answer()
 
     @router.callback_query(F.data == "adm:survey:edit:finish")
     async def finish_survey_edit(callback: CallbackQuery, state: FSMContext) -> None:
-        if await reject_callback(callback): return
+        if await reject_callback(callback):
+            return
         if await state.get_state() != SurveyEditFlow.people.state:
-            await callback.answer("فرم ویرایش فعال نیست.", show_alert=True); return
-        data = await state.get_data(); ids = data.get("selected_people", [])
-        if not ids: await callback.answer("حداقل یک فرد لازم است.", show_alert=True); return
-        start, end = datetime.fromisoformat(data["starts_at"]), datetime.fromisoformat(data["ends_at"])
+            await callback.answer("فرم ویرایش فعال نیست.", show_alert=True)
+            return
+        data = await state.get_data()
+        ids = data.get("selected_people", [])
+        if not ids:
+            await callback.answer("حداقل یک فرد لازم است.", show_alert=True)
+            return
+        start, end = (
+            datetime.fromisoformat(data["starts_at"]),
+            datetime.fromisoformat(data["ends_at"]),
+        )
         async with session_factory() as session:
             survey = await session.get(Survey, data["survey_id"])
-            votes = await session.scalar(select(func.count(Vote.id)).where(Vote.survey_id == data["survey_id"])) or 0
-            people = (await session.scalars(select(Person).where(Person.id.in_(ids), Person.is_active.is_(True)))).all()
+            votes = (
+                await session.scalar(
+                    select(func.count(Vote.id)).where(Vote.survey_id == data["survey_id"])
+                )
+                or 0
+            )
+            people = (
+                await session.scalars(
+                    select(Person).where(Person.id.in_(ids), Person.is_active.is_(True))
+                )
+            ).all()
             if survey is None or survey_status(survey) != SurveyStatus.SCHEDULED or votes:
-                await callback.answer("شرایط ویرایش تغییر کرده؛ ویرایش انجام نشد.", show_alert=True); return
+                await callback.answer("شرایط ویرایش تغییر کرده؛ ویرایش انجام نشد.", show_alert=True)
+                return
             if (
                 len(people) != len(set(ids))
                 or _as_utc_if_naive(start) <= datetime.now(timezone.utc)
                 or _as_utc_if_naive(end) <= _as_utc_if_naive(start)
             ):
-                await callback.answer("افراد یا بازهٔ زمانی معتبر نیست.", show_alert=True); return
-            survey.title=data["title"]; survey.description=data.get("description"); survey.starts_at=start; survey.ends_at=end
+                await callback.answer("افراد یا بازهٔ زمانی معتبر نیست.", show_alert=True)
+                return
+            survey.title = data["title"]
+            survey.description = data.get("description")
+            survey.starts_at = start
+            survey.ends_at = end
             await session.execute(delete(SurveyPerson).where(SurveyPerson.survey_id == survey.id))
             session.add_all([SurveyPerson(survey_id=survey.id, person_id=p.id) for p in people])
-            await session.execute(delete(AdminDraft).where(AdminDraft.platform == settings.bot_platform, AdminDraft.platform_user_id == callback.from_user.id))
+            await session.execute(
+                delete(AdminDraft).where(
+                    AdminDraft.platform == settings.bot_platform,
+                    AdminDraft.platform_user_id == callback.from_user.id,
+                )
+            )
             await session.commit()
-        await state.clear(); await callback.message.edit_text("تغییرات نظرسنجی ذخیره شد."); await callback.answer("ذخیره شد")
+        await state.clear()
+        await callback.message.edit_text("تغییرات نظرسنجی ذخیره شد.")
+        await callback.answer("ذخیره شد")
 
     @router.callback_query(F.data.regexp(r"^adm:survey:cancel:\d+$"))
     async def ask_cancel_survey(callback: CallbackQuery) -> None:
-        if await reject_callback(callback): return
-        survey_id=int(callback.data.rsplit(":",1)[1]); survey,_=await _survey_for_callback(callback,survey_id)
-        if survey is None or survey_status(survey) not in {SurveyStatus.SCHEDULED, SurveyStatus.ACTIVE}:
-            await callback.answer("این نظرسنجی قابل لغو نیست.",show_alert=True); return
-        await callback.message.edit_text(f"نظرسنجی «{survey.title}» لغو شود؟ رأی‌ها و گزارش‌های قبلی حفظ می‌شوند.",reply_markup=inline_options([("⚠️ تأیید لغو",f"adm:survey:cancel:confirm:{survey_id}"),("↩️ بازگشت",f"adm:survey:{survey_id}")]))
+        if await reject_callback(callback):
+            return
+        survey_id = int(callback.data.rsplit(":", 1)[1])
+        survey, _ = await _survey_for_callback(callback, survey_id)
+        if survey is None or survey_status(survey) not in {
+            SurveyStatus.SCHEDULED,
+            SurveyStatus.ACTIVE,
+        }:
+            await callback.answer("این نظرسنجی قابل لغو نیست.", show_alert=True)
+            return
+        await callback.message.edit_text(
+            f"نظرسنجی «{survey.title}» لغو شود؟ رأی‌ها و گزارش‌های قبلی حفظ می‌شوند.",
+            reply_markup=inline_options(
+                [
+                    ("⚠️ تأیید لغو", f"adm:survey:cancel:confirm:{survey_id}"),
+                    ("↩️ بازگشت", f"adm:survey:{survey_id}"),
+                ]
+            ),
+        )
         await callback.answer()
 
     @router.callback_query(F.data.regexp(r"^adm:survey:cancel:confirm:\d+$"))
     async def confirm_cancel_survey(callback: CallbackQuery) -> None:
-        if await reject_callback(callback): return
-        survey_id=int(callback.data.rsplit(":",1)[1])
+        if await reject_callback(callback):
+            return
+        survey_id = int(callback.data.rsplit(":", 1)[1])
         async with session_factory() as session:
-            survey=await session.get(Survey,survey_id)
-            if survey is None or survey_status(survey) not in {SurveyStatus.SCHEDULED,SurveyStatus.ACTIVE}:
-                await callback.answer("این نظرسنجی قابل لغو نیست.",show_alert=True); return
-            survey.status=SurveyStatus.CANCELLED.value; title=survey.title; await session.commit()
-        await callback.message.edit_text(f"نظرسنجی «{title}» لغو شد. رأی‌ها و گزارش‌های قبلی حفظ شده‌اند.",reply_markup=inline_options([("📊 گزارش",f"adm:report:{survey_id}"),("📥 اکسل",f"adm:export:{survey_id}"),("↩️ جزئیات",f"adm:survey:{survey_id}")]))
+            survey = await session.get(Survey, survey_id)
+            if survey is None or survey_status(survey) not in {
+                SurveyStatus.SCHEDULED,
+                SurveyStatus.ACTIVE,
+            }:
+                await callback.answer("این نظرسنجی قابل لغو نیست.", show_alert=True)
+                return
+            survey.status = SurveyStatus.CANCELLED.value
+            title = survey.title
+            await session.commit()
+        await callback.message.edit_text(
+            f"نظرسنجی «{title}» لغو شد. رأی‌ها و گزارش‌های قبلی حفظ شده‌اند.",
+            reply_markup=inline_options(
+                [
+                    ("📊 گزارش", f"adm:report:{survey_id}"),
+                    ("📥 اکسل", f"adm:export:{survey_id}"),
+                    ("↩️ جزئیات", f"adm:survey:{survey_id}"),
+                ]
+            ),
+        )
         await callback.answer("لغو شد")
 
     @router.callback_query(F.data.regexp(r"^adm:survey:people:page:\d+$"))
@@ -1056,9 +1365,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         else:
             selected.add(person_id)
         await state.update_data(selected_people=sorted(selected))
-        await _persist_draft(
-            session_factory, settings, callback.from_user.id, state, "survey"
-        )
+        await _persist_draft(session_factory, settings, callback.from_user.id, state, "survey")
         await _render_survey_people(callback, session_factory, state, page=page)
         await callback.answer()
 
@@ -1077,9 +1384,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         async with session_factory() as session:
             people = (
                 await session.scalars(
-                    select(Person).where(
-                        Person.id.in_(selected_ids), Person.is_active.is_(True)
-                    )
+                    select(Person).where(Person.id.in_(selected_ids), Person.is_active.is_(True))
                 )
             ).all()
             if not people:
@@ -1143,12 +1448,16 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             if not survey:
                 await callback.answer("نظرسنجی پیدا نشد.", show_alert=True)
                 return
-            people_count = await session.scalar(
-                select(func.count(SurveyPerson.id)).where(SurveyPerson.survey_id == survey_id)
-            ) or 0
-            vote_count = await session.scalar(
-                select(func.count(Vote.id)).where(Vote.survey_id == survey_id)
-            ) or 0
+            people_count = (
+                await session.scalar(
+                    select(func.count(SurveyPerson.id)).where(SurveyPerson.survey_id == survey_id)
+                )
+                or 0
+            )
+            vote_count = (
+                await session.scalar(select(func.count(Vote.id)).where(Vote.survey_id == survey_id))
+                or 0
+            )
             details = (
                 f"🗳 {survey.title}\nوضعیت: {_status_label(survey)}\n"
                 f"شروع: {survey.starts_at}\nپایان: {survey.ends_at}\n"
@@ -1161,11 +1470,13 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             buttons.append(("✏️ ویرایش", f"adm:survey:edit:{survey_id}"))
         if survey_status(survey) in {SurveyStatus.SCHEDULED, SurveyStatus.ACTIVE}:
             buttons.append(("⛔ لغو نظرسنجی", f"adm:survey:cancel:{survey_id}"))
-        buttons.extend([
-            ("📊 دیدن گزارش", f"adm:report:{survey_id}"),
-            ("📥 دریافت اکسل", f"adm:export:{survey_id}"),
-            ("↩️ بازگشت به فهرست", "adm:surveys:page:0"),
-        ])
+        buttons.extend(
+            [
+                ("📊 دیدن گزارش", f"adm:report:{survey_id}"),
+                ("📥 دریافت اکسل", f"adm:export:{survey_id}"),
+                ("↩️ بازگشت به فهرست", "adm:surveys:page:0"),
+            ]
+        )
         keyboard = inline_options(buttons)
         await callback.message.edit_text(details, reply_markup=keyboard)
         await callback.answer()
@@ -1181,10 +1492,29 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 await callback.answer("نظرسنجی پیدا نشد.", show_alert=True)
                 return
             stats = await survey_statistics(session, survey_id)
+            assigned = (
+                await session.scalar(
+                    select(func.count(SurveyPerson.id)).where(SurveyPerson.survey_id == survey_id)
+                )
+                or 0
+            )
+            total_votes = (
+                await session.scalar(select(func.count(Vote.id)).where(Vote.survey_id == survey_id))
+                or 0
+            )
+            voter_count = (
+                await session.scalar(
+                    select(func.count(func.distinct(Vote.user_id))).where(
+                        Vote.survey_id == survey_id
+                    )
+                )
+                or 0
+            )
             title = survey.title
+        rated_people = sum(1 for item in stats if item["votes"])
+        progress = f"پیشرفت افراد: {rated_people}/{assigned} ({(rated_people / assigned * 100) if assigned else 0:.0f}٪)"
         summary = "\n".join(
-            f"{item['name']}: {item['votes']} رأی، میانگین {item['average']:.2f}"
-            for item in stats
+            f"{item['name']}: {item['votes']} رأی، میانگین {item['average']:.2f}" for item in stats
         )
         keyboard = inline_options(
             [
@@ -1193,7 +1523,10 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             ]
         )
         await callback.message.answer(
-            f"گزارش «{title}»\n{summary or 'رأیی ثبت نشده است.'}", reply_markup=keyboard
+            f"گزارش «{title}»\nافراد دارای رأی: {rated_people}/{assigned}\n{progress}\n"
+            f"کل رأی‌ها: {total_votes} · رأی‌دهندگان یکتا: {voter_count}\n\n"
+            f"{summary or 'رأیی ثبت نشده است.'}",
+            reply_markup=keyboard,
         )
         await callback.answer()
 
@@ -1258,9 +1591,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             async with session_factory() as session:
                 people = (
                     await session.scalars(
-                        select(Person).where(
-                            Person.id.in_(person_ids), Person.is_active.is_(True)
-                        )
+                        select(Person).where(Person.id.in_(person_ids), Person.is_active.is_(True))
                     )
                 ).all()
                 if len(people) != len(person_ids):

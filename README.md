@@ -10,6 +10,8 @@ A Persian-language bot for collecting person-by-person ratings in independent, t
 - Admin ID allowlist, basic person and survey creation commands, aggregate statistics, and XLSX exports that omit voter identity for anonymous surveys.
 - Async database models and Docker packaging.
 - One codebase and database schema for Telegram and Bale; platform-scoped user identities.
+- CSV/XLSX bulk people import with a validation preview and explicit confirmation.
+- Survey progress and anonymous aggregate counts in admin reports and Excel.
 
 ## Architecture
 
@@ -55,6 +57,8 @@ Alembic migrations run on startup. The initial baseline creates missing tables a
 ## Admin commands
 
 Use `/start` first, then open **⚙️ پنل مدیریت**. Commands are restricted to IDs in `ADMIN_USER_IDS`:
+
+For bulk import, open **👥 مدیریت افراد** → **ورود گروهی از فایل** and send a CSV or XLSX with headers `شناسه داخلی`, `نام`, `نام خانوادگی`, and optional `توضیح`. Files are limited to 5 MB and 1,000 data rows. Review invalid rows before confirming; valid rows are committed together in one transaction.
 
 ```text
 /addperson P-001|علی|رضایی
