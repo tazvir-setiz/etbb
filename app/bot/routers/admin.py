@@ -21,8 +21,26 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.bot.keyboards import admin_menu, inline_options, paginated_options, participant_menu
 from app.config import Settings
 from app.exports.excel import build_survey_workbook
-from app.models import AdminDraft, Person, Survey, SurveyPerson, SurveyStatus, Vote
+from app.models import (
+    AdminDraft,
+    AdminRole,
+    AdminUser,
+    Person,
+    Survey,
+    SurveyPerson,
+    SurveyStatus,
+    Vote,
+)
 from app.services.admin_drafts import delete_admin_draft, get_admin_draft, save_admin_draft
+from app.services.admin_roles import (
+    AdminRoleError,
+    add_admin_user,
+    get_user_role,
+    list_admin_users,
+    remove_admin_user,
+    update_admin_role,
+)
+from app.services.audit import list_audit_logs, record_audit_log
 from app.services.people_import import PeopleImportError, parse_people_file
 from app.services.users import register_or_update_user
 from app.services.voting import survey_statistics, survey_status
@@ -62,8 +80,22 @@ class SurveyEditFlow(StatesGroup):
     people = State()
 
 
-def _is_admin(user_id: int, settings: Settings) -> bool:
-    return user_id in settings.admin_ids
+class AdminAddFlow(StatesGroup):
+    user_id = State()
+
+
+async def _get_user_role(
+    session_factory: async_sessionmaker,
+    settings: Settings,
+    user_id: int,
+) -> AdminRole | None:
+    async with session_factory() as session:
+        return await get_user_role(
+            session,
+            platform=settings.bot_platform,
+            platform_user_id=user_id,
+            initial_admin_ids=settings.admin_ids,
+        )
 
 
 async def _persist_draft(
@@ -256,17 +288,25 @@ async def _render_reports(
 def build_admin_router(session_factory: async_sessionmaker, settings: Settings) -> Router:
     router = Router(name="admin")
 
-    async def reject_message(message: Message) -> bool:
-        if _is_admin(message.from_user.id, settings):
-            return False
-        await message.answer("شما دسترسی مدیریت ندارید.")
-        return True
+    async def reject_message(message: Message, required_role: AdminRole = AdminRole.ADMIN) -> bool:
+        role = await _get_user_role(session_factory, settings, message.from_user.id)
+        if role is None:
+            await message.answer("شما دسترسی مدیریت ندارید.")
+            return True
+        if required_role == AdminRole.OWNER and role != AdminRole.OWNER:
+            await message.answer("این عملیات فقط برای مالک سیستم مجاز است.")
+            return True
+        return False
 
-    async def reject_callback(callback: CallbackQuery) -> bool:
-        if _is_admin(callback.from_user.id, settings):
-            return False
-        await callback.answer("دسترسی ندارید.", show_alert=True)
-        return True
+    async def reject_callback(callback: CallbackQuery, required_role: AdminRole = AdminRole.ADMIN) -> bool:
+        role = await _get_user_role(session_factory, settings, callback.from_user.id)
+        if role is None:
+            await callback.answer("دسترسی ندارید.", show_alert=True)
+            return True
+        if required_role == AdminRole.OWNER and role != AdminRole.OWNER:
+            await callback.answer("این عملیات فقط برای مالک سیستم مجاز است.", show_alert=True)
+            return True
+        return False
 
     async def render_people_import(target: Message | CallbackQuery, state: FSMContext) -> None:
         data = await state.get_data()
@@ -304,16 +344,19 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
     @router.message(Command("cancel"))
     async def cancel_flow(message: Message, state: FSMContext) -> None:
         await state.clear()
-        is_admin = _is_admin(message.from_user.id, settings)
+        role = await _get_user_role(session_factory, settings, message.from_user.id)
+        is_admin = role is not None
         if is_admin:
             await _delete_draft(session_factory, settings, message.from_user.id)
         await message.answer(
-            "روند جاری لغو شد.", reply_markup=admin_menu() if is_admin else participant_menu()
+            "روند جاری لغو شد.",
+            reply_markup=admin_menu(is_owner=(role == AdminRole.OWNER)) if is_admin else participant_menu(),
         )
 
     @router.message(CommandStart())
     async def pass_start_to_user_router(message: Message, state: FSMContext) -> None:
-        if _is_admin(message.from_user.id, settings):
+        role = await _get_user_role(session_factory, settings, message.from_user.id)
+        if role is not None:
             draft = await get_admin_draft(
                 session_factory,
                 platform=settings.bot_platform,
@@ -384,7 +427,7 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     prompts[draft.step] = f"مقدار تازهٔ {field_names[field]} را بفرستید:"
                 await message.answer(
                     "فرم نیمه‌کاره بازیابی شد. برای لغو /cancel را بفرستید.",
-                    reply_markup=admin_menu(),
+                    reply_markup=admin_menu(is_owner=(role == AdminRole.OWNER)),
                 )
                 if draft.step == SurveyWizard.people.state:
                     await _render_survey_people(message, session_factory, state, page=0)
@@ -411,7 +454,11 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         if await reject_message(message):
             return
         await state.clear()
-        await message.answer("پنل مدیریت — بخش موردنظر را انتخاب کنید.", reply_markup=admin_menu())
+        role = await _get_user_role(session_factory, settings, message.from_user.id)
+        await message.answer(
+            "پنل مدیریت — بخش موردنظر را انتخاب کنید.",
+            reply_markup=admin_menu(is_owner=(role == AdminRole.OWNER)),
+        )
 
     @router.message(F.text == "🎭 حالت ارزیاب")
     async def open_participant_mode(message: Message, state: FSMContext) -> None:
@@ -552,6 +599,15 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     )
                 )
                 await session.commit()
+                await record_audit_log(
+                    session,
+                    platform=settings.bot_platform,
+                    actor_id=callback.from_user.id,
+                    action="PEOPLE_BULK_IMPORT",
+                    target_type="people",
+                    target_id=str(len(valid_rows)),
+                    details={"imported_count": len(valid_rows), "skipped_count": len(rows) - len(valid_rows)},
+                )
         except IntegrityError:
             await callback.answer(
                 "ثبت انجام نشد؛ یکی از شناسه‌ها تکراری شده است. فایل را دوباره بررسی کنید.",
@@ -658,6 +714,15 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             )
             try:
                 await session.commit()
+                await record_audit_log(
+                    session,
+                    platform=settings.bot_platform,
+                    actor_id=message.from_user.id,
+                    action="PERSON_CREATE",
+                    target_type="person",
+                    target_id=str(person.id),
+                    details={"internal_id": person.internal_id, "display_name": person.display_name},
+                )
             except IntegrityError:
                 await session.rollback()
                 await message.answer(
@@ -665,8 +730,12 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 )
                 return
             display_name = person.display_name
+        role = await _get_user_role(session_factory, settings, message.from_user.id)
         await state.clear()
-        await message.answer(f"فرد «{display_name}» اضافه شد.", reply_markup=admin_menu())
+        await message.answer(
+            f"فرد «{display_name}» اضافه شد.",
+            reply_markup=admin_menu(is_owner=(role == AdminRole.OWNER)),
+        )
 
     @router.callback_query(F.data == "adm:people:add")
     async def callback_add_person(callback: CallbackQuery, state: FSMContext) -> None:
@@ -837,13 +906,26 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             )
             try:
                 await session.commit()
+                await record_audit_log(
+                    session,
+                    platform=settings.bot_platform,
+                    actor_id=message.from_user.id,
+                    action="PERSON_EDIT",
+                    target_type="person",
+                    target_id=str(person.id),
+                    details={"field": field, "internal_id": person.internal_id, "display_name": person.display_name},
+                )
             except IntegrityError:
                 await session.rollback()
                 await message.answer("ثبت تغییر انجام نشد؛ مقدار شناسه احتمالاً تکراری است.")
                 return
             display_name = person.display_name
+        role = await _get_user_role(session_factory, settings, message.from_user.id)
         await state.clear()
-        await message.answer(f"اطلاعات «{display_name}» به‌روزرسانی شد.", reply_markup=admin_menu())
+        await message.answer(
+            f"اطلاعات «{display_name}» به‌روزرسانی شد.",
+            reply_markup=admin_menu(is_owner=(role == AdminRole.OWNER)),
+        )
 
     @router.callback_query(F.data.regexp(r"^adm:person:toggle:\d+$"))
     async def toggle_person(callback: CallbackQuery) -> None:
@@ -857,6 +939,15 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 return
             person.is_active = not person.is_active
             await session.commit()
+            await record_audit_log(
+                session,
+                platform=settings.bot_platform,
+                actor_id=callback.from_user.id,
+                action="PERSON_TOGGLE_ACTIVE",
+                target_type="person",
+                target_id=str(person.id),
+                details={"internal_id": person.internal_id, "is_active": person.is_active},
+            )
             text = (
                 f"👤 {person.display_name}\nشناسه: {person.internal_id}\n"
                 f"وضعیت: {'فعال' if person.is_active else 'غیرفعال'}"
@@ -1275,6 +1366,15 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 )
             )
             await session.commit()
+            await record_audit_log(
+                session,
+                platform=settings.bot_platform,
+                actor_id=callback.from_user.id,
+                action="SURVEY_EDIT",
+                target_type="survey",
+                target_id=str(survey.id),
+                details={"title": survey.title, "people_count": len(people)},
+            )
         await state.clear()
         await callback.message.edit_text("تغییرات نظرسنجی ذخیره شد.")
         await callback.answer("ذخیره شد")
@@ -1318,6 +1418,15 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             survey.status = SurveyStatus.CANCELLED.value
             title = survey.title
             await session.commit()
+            await record_audit_log(
+                session,
+                platform=settings.bot_platform,
+                actor_id=callback.from_user.id,
+                action="SURVEY_CANCEL",
+                target_type="survey",
+                target_id=str(survey_id),
+                details={"title": title},
+            )
         await callback.message.edit_text(
             f"نظرسنجی «{title}» لغو شد. رأی‌ها و گزارش‌های قبلی حفظ شده‌اند.",
             reply_markup=inline_options(
@@ -1409,6 +1518,15 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             )
             await session.commit()
             survey_id = survey.id
+            await record_audit_log(
+                session,
+                platform=settings.bot_platform,
+                actor_id=callback.from_user.id,
+                action="SURVEY_CREATE",
+                target_type="survey",
+                target_id=str(survey_id),
+                details={"title": data["title"], "people_count": len(people)},
+            )
         await state.clear()
         await callback.message.edit_text(
             f"نظرسنجی «{data['title']}» ساخته شد.\nشناسه: {survey_id}\nافراد: {len(people)}"
@@ -1570,6 +1688,15 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     )
                 )
                 await session.commit()
+                await record_audit_log(
+                    session,
+                    platform=settings.bot_platform,
+                    actor_id=message.from_user.id,
+                    action="PERSON_CREATE",
+                    target_type="person",
+                    target_id=internal_id,
+                    details={"internal_id": internal_id, "display_name": f"{first_name} {last_name}"},
+                )
             await message.answer(f"فرد «{first_name} {last_name}» اضافه شد.")
         except (ValueError, IndexError):
             await message.answer("قالب: /addperson شناسه|نام|نام‌خانوادگی")
@@ -1609,6 +1736,15 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     session.add(SurveyPerson(survey_id=survey.id, person_id=person.id))
                 await session.commit()
                 survey_id = survey.id
+                await record_audit_log(
+                    session,
+                    platform=settings.bot_platform,
+                    actor_id=message.from_user.id,
+                    action="SURVEY_CREATE",
+                    target_type="survey",
+                    target_id=str(survey_id),
+                    details={"title": title, "people_count": len(people)},
+                )
             await message.answer(f"نظرسنجی ساخته شد. شناسه: {survey_id}")
         except (ValueError, IndexError):
             await message.answer(
@@ -1622,7 +1758,10 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         if await reject_callback(callback):
             return
         await state.clear()
-        await callback.message.answer("پنل مدیریت", reply_markup=admin_menu())
+        role = await _get_user_role(session_factory, settings, callback.from_user.id)
+        await callback.message.answer(
+            "پنل مدیریت", reply_markup=admin_menu(is_owner=(role == AdminRole.OWNER))
+        )
         await callback.answer()
 
     @router.callback_query(F.data == "adm:cancel")
@@ -1631,7 +1770,256 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.clear()
         await _delete_draft(session_factory, settings, callback.from_user.id)
-        await callback.message.answer("فرم جاری لغو شد.", reply_markup=admin_menu())
+        role = await _get_user_role(session_factory, settings, callback.from_user.id)
+        await callback.message.answer(
+            "فرم جاری لغو شد.", reply_markup=admin_menu(is_owner=(role == AdminRole.OWNER))
+        )
+        await callback.answer()
+
+    async def _render_admin_list(target: Message | CallbackQuery) -> None:
+        async with session_factory() as session:
+            admins = await list_admin_users(
+                session,
+                platform=settings.bot_platform,
+                initial_admin_ids=settings.admin_ids,
+            )
+        lines = ["🛡 **مدیریت مدیران سیستم**\n", "فهرست مدیران و نقش‌های فعلی:"]
+        buttons = []
+        for admin in admins:
+            role_label = "👑 مالک" if admin.role == AdminRole.OWNER.value else "🛠 مدیر"
+            lines.append(f"• شناسه: `{admin.platform_user_id}` | نقش: {role_label}")
+            buttons.append(
+                (f"{role_label} · {admin.platform_user_id}", f"adm:admin:view:{admin.platform_user_id}")
+            )
+        buttons.append(("➕ افزودن مدیر جدید", "adm:admin:add"))
+        buttons.append(("↩️ بازگشت به پنل مدیر", "adm:home"))
+        await _send_or_edit(target, "\n".join(lines), inline_options(buttons, columns=1))
+
+    @router.message(F.text == "🛡 مدیریت مدیران")
+    async def open_admin_management(message: Message, state: FSMContext) -> None:
+        if await reject_message(message, required_role=AdminRole.OWNER):
+            return
+        await state.clear()
+        await _render_admin_list(message)
+
+    @router.callback_query(F.data == "adm:admin:list")
+    async def callback_admin_list(callback: CallbackQuery, state: FSMContext) -> None:
+        if await reject_callback(callback, required_role=AdminRole.OWNER):
+            return
+        await state.clear()
+        await _render_admin_list(callback)
+        await callback.answer()
+
+    @router.callback_query(F.data.regexp(r"^adm:admin:view:\d+$"))
+    async def view_admin_detail(callback: CallbackQuery) -> None:
+        if await reject_callback(callback, required_role=AdminRole.OWNER):
+            return
+        target_user_id = int(callback.data.rsplit(":", 1)[1])
+        async with session_factory() as session:
+            admin = await session.scalar(
+                select(AdminUser).where(
+                    AdminUser.platform == settings.bot_platform,
+                    AdminUser.platform_user_id == target_user_id,
+                )
+            )
+        if not admin:
+            await callback.answer("مدیر موردنظر یافت نشد.", show_alert=True)
+            return
+        role_label = "👑 مالک" if admin.role == AdminRole.OWNER.value else "🛠 مدیر"
+        other_role = "مدیر" if admin.role == AdminRole.OWNER.value else "مالک"
+        lines = [
+            "👤 **جزئیات دسترسی مدیر**",
+            f"شناسه عددی: `{target_user_id}`",
+            f"نقش فعلی: {role_label}",
+        ]
+        buttons = [
+            (f"🔄 تغییر نقش به {other_role}", f"adm:admin:toggle:{target_user_id}"),
+            ("🗑 حذف دسترسی", f"adm:admin:remove:{target_user_id}"),
+            ("↩️ بازگشت به فهرست مدیران", "adm:admin:list"),
+        ]
+        await _send_or_edit(callback, "\n".join(lines), inline_options(buttons, columns=1))
+        await callback.answer()
+
+    @router.callback_query(F.data.regexp(r"^adm:admin:toggle:\d+$"))
+    async def toggle_admin_role_callback(callback: CallbackQuery) -> None:
+        if await reject_callback(callback, required_role=AdminRole.OWNER):
+            return
+        target_user_id = int(callback.data.rsplit(":", 1)[1])
+        async with session_factory() as session:
+            current_admin = await session.scalar(
+                select(AdminUser).where(
+                    AdminUser.platform == settings.bot_platform,
+                    AdminUser.platform_user_id == target_user_id,
+                )
+            )
+            if not current_admin:
+                await callback.answer("مدیر موردنظر یافت نشد.", show_alert=True)
+                return
+            new_role = (
+                AdminRole.ADMIN if current_admin.role == AdminRole.OWNER.value else AdminRole.OWNER
+            )
+            try:
+                await update_admin_role(
+                    session,
+                    platform=settings.bot_platform,
+                    platform_user_id=target_user_id,
+                    new_role=new_role,
+                    actor_id=callback.from_user.id,
+                    initial_admin_ids=settings.admin_ids,
+                )
+                await callback.answer("نقش کاربر با موفقیت تغییر کرد.")
+            except AdminRoleError as exc:
+                await callback.answer(str(exc), show_alert=True)
+                return
+        await _render_admin_list(callback)
+
+    @router.callback_query(F.data.regexp(r"^adm:admin:remove:\d+$"))
+    async def remove_admin_callback(callback: CallbackQuery) -> None:
+        if await reject_callback(callback, required_role=AdminRole.OWNER):
+            return
+        target_user_id = int(callback.data.rsplit(":", 1)[1])
+        async with session_factory() as session:
+            try:
+                await remove_admin_user(
+                    session,
+                    platform=settings.bot_platform,
+                    platform_user_id=target_user_id,
+                    actor_id=callback.from_user.id,
+                    initial_admin_ids=settings.admin_ids,
+                )
+                await callback.answer("دسترسی مدیر حذف شد.")
+            except AdminRoleError as exc:
+                await callback.answer(str(exc), show_alert=True)
+                return
+        await _render_admin_list(callback)
+
+    @router.callback_query(F.data == "adm:admin:add")
+    async def start_add_admin(callback: CallbackQuery, state: FSMContext) -> None:
+        if await reject_callback(callback, required_role=AdminRole.OWNER):
+            return
+        await state.set_state(AdminAddFlow.user_id)
+        await _send_or_edit(
+            callback,
+            "شناسهٔ عددی کاربر در پیام‌رسان را ارسال کنید:",
+            inline_options([("❌ انصراف", "adm:admin:list")]),
+        )
+        await callback.answer()
+
+    @router.message(AdminAddFlow.user_id)
+    async def receive_admin_id(message: Message, state: FSMContext) -> None:
+        if await reject_message(message, required_role=AdminRole.OWNER):
+            return
+        try:
+            target_id = int(_digits_to_ascii(message.text.strip()))
+            if target_id <= 0:
+                raise ValueError
+        except (ValueError, AttributeError):
+            await message.answer("شناسه باید یک عدد معتبر و مثبت باشد. دوباره ارسال کنید:")
+            return
+        await state.update_data(target_admin_id=target_id)
+        buttons = [
+            ("👑 مالک", f"adm:admin:set_role:{target_id}:OWNER"),
+            ("🛠 مدیر", f"adm:admin:set_role:{target_id}:ADMIN"),
+            ("❌ انصراف", "adm:admin:list"),
+        ]
+        await message.answer(
+            f"نقش موردنظر برای کاربر `{target_id}` را انتخاب کنید:",
+            reply_markup=inline_options(buttons, columns=2),
+        )
+
+    @router.callback_query(F.data.regexp(r"^adm:admin:set_role:\d+:(OWNER|ADMIN)$"))
+    async def finish_add_admin(callback: CallbackQuery, state: FSMContext) -> None:
+        if await reject_callback(callback, required_role=AdminRole.OWNER):
+            return
+        _, _, _, target_id_str, role_str = callback.data.split(":")
+        target_id = int(target_id_str)
+        role = AdminRole(role_str)
+        async with session_factory() as session:
+            try:
+                await add_admin_user(
+                    session,
+                    platform=settings.bot_platform,
+                    platform_user_id=target_id,
+                    role=role,
+                    actor_id=callback.from_user.id,
+                    initial_admin_ids=settings.admin_ids,
+                )
+                await callback.answer("مدیر جدید با موفقیت اضافه شد.")
+            except AdminRoleError as exc:
+                await callback.answer(str(exc), show_alert=True)
+                return
+        await state.clear()
+        await _render_admin_list(callback)
+
+    async def _render_audit_logs(target: Message | CallbackQuery, page: int = 0) -> None:
+        limit = 8
+        offset = page * limit
+        async with session_factory() as session:
+            logs, total = await list_audit_logs(
+                session,
+                platform=settings.bot_platform,
+                limit=limit,
+                offset=offset,
+            )
+        page_count = max(1, ceil(total / limit))
+        page = min(max(page, 0), page_count - 1)
+        action_names = {
+            "SURVEY_CANCEL": "لغو نظرسنجی",
+            "SURVEY_CREATE": "ساخت نظرسنجی",
+            "SURVEY_EDIT": "ویرایش نظرسنجی",
+            "PERSON_CREATE": "افزودن فرد",
+            "PERSON_EDIT": "ویرایش فرد",
+            "PERSON_TOGGLE_ACTIVE": "تغییر وضعیت فرد",
+            "PEOPLE_BULK_IMPORT": "ورود گروهی افراد",
+            "ADMIN_ADD": "افزودن مدیر",
+            "ADMIN_ROLE_CHANGE": "تغییر نقش مدیر",
+            "ADMIN_REMOVE": "حذف مدیر",
+        }
+        lines = [f"📜 **وقایع ثبت‌شدهٔ سیستم** (مجموع: {total})\n"]
+        if not logs:
+            lines.append("هنوز واقعه‌ای ثبت نشده است.")
+        else:
+            for log in logs:
+                action_text = action_names.get(log.action, log.action)
+                time_str = log.created_at.strftime("%Y-%m-%d %H:%M")
+                detail_parts = []
+                if log.details:
+                    detail_parts = [f"{k}: {v}" for k, v in log.details.items()]
+                detail_str = f" ({'، '.join(detail_parts)})" if detail_parts else ""
+                lines.append(f"• [{time_str}] **{action_text}** توسط `{log.actor_user_id}`{detail_str}")
+
+        buttons = []
+        if page > 0:
+            buttons.append(InlineKeyboardButton(text="⬅️ قبلی", callback_data=f"adm:audit:page:{page - 1}"))
+        if page_count > 1:
+            buttons.append(InlineKeyboardButton(text=f"{page + 1}/{page_count}", callback_data="noop"))
+        if page + 1 < page_count:
+            buttons.append(InlineKeyboardButton(text="بعدی ➡️", callback_data=f"adm:audit:page:{page + 1}"))
+
+        keyboard_rows = []
+        if buttons:
+            keyboard_rows.append(buttons)
+        keyboard_rows.append([InlineKeyboardButton(text="↩️ بازگشت به پنل", callback_data="adm:home")])
+
+        await _send_or_edit(
+            target,
+            "\n".join(lines),
+            InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
+        )
+
+    @router.message(F.text == "📜 وقایع سیستم")
+    async def audit_logs_message(message: Message, state: FSMContext) -> None:
+        if await reject_message(message, required_role=AdminRole.OWNER):
+            return
+        await state.clear()
+        await _render_audit_logs(message, page=0)
+
+    @router.callback_query(F.data.regexp(r"^adm:audit:page:\d+$"))
+    async def audit_logs_callback(callback: CallbackQuery) -> None:
+        if await reject_callback(callback, required_role=AdminRole.OWNER):
+            return
+        page = int(callback.data.rsplit(":", 1)[1])
+        await _render_audit_logs(callback, page=page)
         await callback.answer()
 
     @router.callback_query(F.data == "noop")

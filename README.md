@@ -56,7 +56,7 @@ Alembic migrations run on startup. The initial baseline creates missing tables a
 
 ## Admin commands
 
-Use `/start` first, then open **⚙️ پنل مدیریت**. Commands are restricted to IDs in `ADMIN_USER_IDS`:
+Use `/start` first, then open **⚙️ پنل مدیریت**. Initial admin IDs in `ADMIN_USER_IDS` are bootstrapped as **Owner**. Owners can add new administrators, toggle roles between Owner and Admin, and remove administrator access (removing or demoting the last owner is strictly prevented). Sensitive actions (survey cancellation/creation/editing, person management, bulk import, and admin role changes) are recorded in **📜 وقایع سیستم** while preserving voter anonymity. Commands and callbacks check role authorization:
 
 For bulk import, open **👥 مدیریت افراد** → **ورود گروهی از فایل** and send a CSV or XLSX with headers `شناسه داخلی`, `نام`, `نام خانوادگی`, and optional `توضیح`. Files are limited to 5 MB and 1,000 data rows. Review invalid rows before confirming; valid rows are committed together in one transaction.
 

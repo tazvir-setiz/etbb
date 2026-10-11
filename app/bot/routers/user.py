@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.bot.keyboards import inline_options, participant_menu
 from app.config import Settings
-from app.models import Person, Survey, SurveyPerson, SurveyStatus, User, Vote
+from app.models import AdminRole, Person, Survey, SurveyPerson, SurveyStatus, User, Vote
+from app.services.admin_roles import get_user_role
 from app.services.users import register_or_update_user
 from app.services.voting import VotingError, record_vote, survey_status
 
@@ -22,8 +23,15 @@ def build_user_router(session_factory: async_sessionmaker, settings: Settings) -
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
-        is_admin = message.from_user.id in settings.admin_ids
         async with session_factory() as session:
+            role = await get_user_role(
+                session,
+                platform=settings.bot_platform,
+                platform_user_id=message.from_user.id,
+                initial_admin_ids=settings.admin_ids,
+            )
+            is_admin = role is not None
+            is_owner = role == AdminRole.OWNER
             await register_or_update_user(
                 session,
                 platform=settings.bot_platform,
@@ -35,7 +43,8 @@ def build_user_router(session_factory: async_sessionmaker, settings: Settings) -
         if is_admin:
             from app.bot.keyboards import admin_menu
 
-            await message.answer("سلام مدیر! از پنل مدیریت یک بخش را انتخاب کنید.", reply_markup=admin_menu())
+            greeting = "سلام مالک گرامی!" if is_owner else "سلام مدیر گرامی!"
+            await message.answer(f"{greeting} از پنل مدیریت یک بخش را انتخاب کنید.", reply_markup=admin_menu(is_owner=is_owner))
         else:
             await message.answer(
                 "سلام! به سامانه ارزیابی خوش آمدید.", reply_markup=participant_menu()

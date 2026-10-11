@@ -11,13 +11,16 @@ def participant_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-def admin_menu() -> ReplyKeyboardMarkup:
+def admin_menu(is_owner: bool = False) -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(text="👥 مدیریت افراد"), KeyboardButton(text="➕ افزودن فرد")],
+        [KeyboardButton(text="🗳 مدیریت نظرسنجی‌ها"), KeyboardButton(text="➕ ساخت نظرسنجی")],
+        [KeyboardButton(text="📈 گزارش‌ها"), KeyboardButton(text="🎭 حالت ارزیاب")],
+    ]
+    if is_owner:
+        keyboard.append([KeyboardButton(text="🛡 مدیریت مدیران"), KeyboardButton(text="📜 وقایع سیستم")])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="👥 مدیریت افراد"), KeyboardButton(text="➕ افزودن فرد")],
-            [KeyboardButton(text="🗳 مدیریت نظرسنجی‌ها"), KeyboardButton(text="➕ ساخت نظرسنجی")],
-            [KeyboardButton(text="📈 گزارش‌ها"), KeyboardButton(text="🎭 حالت ارزیاب")],
-        ],
+        keyboard=keyboard,
         resize_keyboard=True,
     )
 
