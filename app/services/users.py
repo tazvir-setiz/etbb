@@ -1,8 +1,12 @@
+import logging
+
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import User
+
+logger = logging.getLogger(__name__)
 
 
 async def register_or_update_user(
@@ -35,3 +39,11 @@ async def register_or_update_user(
     )
     await session.execute(statement)
     await session.commit()
+    logger.debug(
+        "[%s] register_or_update_user: user_id=%s, name='%s', username=@%s, is_admin=%s",
+        platform,
+        platform_user_id,
+        full_name,
+        username,
+        is_admin,
+    )

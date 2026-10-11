@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from math import ceil
 
@@ -48,6 +49,8 @@ from app.services.datetime_parser import (
 from app.services.people_import import PeopleImportError, parse_people_file
 from app.services.users import register_or_update_user
 from app.services.voting import survey_statistics, survey_status
+
+logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 8
 
@@ -286,9 +289,22 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
     async def reject_message(message: Message, required_role: AdminRole = AdminRole.ADMIN) -> bool:
         role = await _get_user_role(session_factory, settings, message.from_user.id)
         if role is None:
+            logger.warning(
+                "[%s] Admin message rejected: user %s has no admin role (text=%r)",
+                settings.bot_platform,
+                message.from_user.id,
+                message.text,
+            )
             await message.answer("شما دسترسی مدیریت ندارید.")
             return True
         if required_role == AdminRole.OWNER and role != AdminRole.OWNER:
+            logger.warning(
+                "[%s] Owner message rejected: user %s has role=%s but OWNER required (text=%r)",
+                settings.bot_platform,
+                message.from_user.id,
+                role.value,
+                message.text,
+            )
             await message.answer("این عملیات فقط برای مالک سیستم مجاز است.")
             return True
         return False
@@ -296,9 +312,22 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
     async def reject_callback(callback: CallbackQuery, required_role: AdminRole = AdminRole.ADMIN) -> bool:
         role = await _get_user_role(session_factory, settings, callback.from_user.id)
         if role is None:
+            logger.warning(
+                "[%s] Admin callback rejected: user %s has no admin role (data=%r)",
+                settings.bot_platform,
+                callback.from_user.id,
+                callback.data,
+            )
             await callback.answer("دسترسی ندارید.", show_alert=True)
             return True
         if required_role == AdminRole.OWNER and role != AdminRole.OWNER:
+            logger.warning(
+                "[%s] Owner callback rejected: user %s has role=%s but OWNER required (data=%r)",
+                settings.bot_platform,
+                callback.from_user.id,
+                role.value,
+                callback.data,
+            )
             await callback.answer("این عملیات فقط برای مالک سیستم مجاز است.", show_alert=True)
             return True
         return False
@@ -343,6 +372,12 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         is_admin = role is not None
         if is_admin:
             await _delete_draft(session_factory, settings, message.from_user.id)
+        logger.info(
+            "[%s] /cancel received from user %s (is_admin=%s)",
+            settings.bot_platform,
+            message.from_user.id,
+            is_admin,
+        )
         await message.answer(
             "روند جاری لغو شد.",
             reply_markup=admin_menu(is_owner=(role == AdminRole.OWNER)) if is_admin else participant_menu(),
@@ -382,6 +417,13 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 },
             }
             if draft and draft.step in valid_steps.get(draft.draft_type, set()):
+                logger.info(
+                    "[%s] Restoring admin draft for user %s: type=%s, step=%s",
+                    settings.bot_platform,
+                    message.from_user.id,
+                    draft.draft_type,
+                    draft.step,
+                )
                 async with session_factory() as session:
                     await register_or_update_user(
                         session,
@@ -527,6 +569,18 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 row["error"] = "شناسه در خود فایل تکرار شده است"
             elif internal_id in existing_ids:
                 row["error"] = "این شناسه قبلاً در سامانه ثبت شده است"
+        valid_in_file = sum(1 for r in parsed if not r.get("error"))
+        logger.info(
+            "[%s] Bulk people file received from user %s: file='%s' (size=%s). Rows: total=%d, valid=%d, in-file duplicates=%d, db duplicates=%d",
+            settings.bot_platform,
+            message.from_user.id,
+            filename,
+            document.file_size,
+            len(parsed),
+            valid_in_file,
+            len(duplicate_ids),
+            len(existing_ids),
+        )
         await state.update_data(import_rows=parsed, import_filename=filename, import_preview_page=0)
         await _persist_draft(
             session_factory, settings, message.from_user.id, state, "people_import"
@@ -545,6 +599,11 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         await state.clear()
         await _delete_draft(session_factory, settings, callback.from_user.id)
+        logger.info(
+            "[%s] Bulk people import cancelled by user %s",
+            settings.bot_platform,
+            callback.from_user.id,
+        )
         await callback.message.edit_text("ورود گروهی لغو شد.")
         await callback.answer()
 
@@ -603,7 +662,18 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     target_id=str(len(valid_rows)),
                     details={"imported_count": len(valid_rows), "skipped_count": len(rows) - len(valid_rows)},
                 )
+                logger.info(
+                    "[%s] Bulk people import committed by user %s: %d persons created, %d skipped",
+                    settings.bot_platform,
+                    callback.from_user.id,
+                    len(valid_rows),
+                    len(rows) - len(valid_rows),
+                )
         except IntegrityError:
+            logger.warning(
+                "[%s] Bulk people import failed on commit: duplicate internal_id detected",
+                settings.bot_platform,
+            )
             await callback.answer(
                 "ثبت انجام نشد؛ یکی از شناسه‌ها تکراری شده است. فایل را دوباره بررسی کنید.",
                 show_alert=True,
@@ -717,6 +787,14 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     target_type="person",
                     target_id=str(person.id),
                     details={"internal_id": person.internal_id, "display_name": person.display_name},
+                )
+                logger.info(
+                    "[%s] Person created by user %s: id=%s, internal_id=%s, display_name='%s'",
+                    settings.bot_platform,
+                    message.from_user.id,
+                    person.id,
+                    person.internal_id,
+                    person.display_name,
                 )
             except IntegrityError:
                 await session.rollback()
@@ -910,6 +988,14 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     target_id=str(person.id),
                     details={"field": field, "internal_id": person.internal_id, "display_name": person.display_name},
                 )
+                logger.info(
+                    "[%s] Person edited by user %s: person_id=%s, field=%s, new_value=%s",
+                    settings.bot_platform,
+                    message.from_user.id,
+                    person.id,
+                    field,
+                    value,
+                )
             except IntegrityError:
                 await session.rollback()
                 await message.answer("ثبت تغییر انجام نشد؛ مقدار شناسه احتمالاً تکراری است.")
@@ -942,6 +1028,14 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 target_type="person",
                 target_id=str(person.id),
                 details={"internal_id": person.internal_id, "is_active": person.is_active},
+            )
+            logger.info(
+                "[%s] Person active status toggled by user %s: person_id=%s ('%s'), new_is_active=%s",
+                settings.bot_platform,
+                callback.from_user.id,
+                person.id,
+                person.display_name,
+                person.is_active,
             )
             text = (
                 f"👤 {person.display_name}\nشناسه: {person.internal_id}\n"
@@ -1378,6 +1472,14 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 target_id=str(survey.id),
                 details={"title": survey.title, "people_count": len(people)},
             )
+            logger.info(
+                "[%s] Survey edited by user %s: survey_id=%s, title='%s', people_count=%d",
+                settings.bot_platform,
+                callback.from_user.id,
+                survey.id,
+                survey.title,
+                len(people),
+            )
         await state.clear()
         await callback.message.edit_text("تغییرات نظرسنجی ذخیره شد.")
         await callback.answer("ذخیره شد")
@@ -1429,6 +1531,13 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 target_type="survey",
                 target_id=str(survey_id),
                 details={"title": title},
+            )
+            logger.info(
+                "[%s] Survey cancelled by user %s: survey_id=%s, title='%s'",
+                settings.bot_platform,
+                callback.from_user.id,
+                survey_id,
+                title,
             )
         await callback.message.edit_text(
             f"نظرسنجی «{title}» لغو شد. رأی‌ها و گزارش‌های قبلی حفظ شده‌اند.",
@@ -1529,6 +1638,16 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 target_type="survey",
                 target_id=str(survey_id),
                 details={"title": data["title"], "people_count": len(people)},
+            )
+            logger.info(
+                "[%s] Survey created by user %s: survey_id=%s, title='%s', people_count=%d, starts_at=%s, ends_at=%s",
+                settings.bot_platform,
+                callback.from_user.id,
+                survey_id,
+                data["title"],
+                len(people),
+                survey.starts_at,
+                survey.ends_at,
             )
         await state.clear()
         await callback.message.edit_text(
@@ -1870,6 +1989,13 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     actor_id=callback.from_user.id,
                     initial_admin_ids=settings.admin_ids,
                 )
+                logger.info(
+                    "[%s] Owner %s changed admin %s role to %s",
+                    settings.bot_platform,
+                    callback.from_user.id,
+                    target_user_id,
+                    new_role.value,
+                )
                 await callback.answer("نقش کاربر با موفقیت تغییر کرد.")
             except AdminRoleError as exc:
                 await callback.answer(str(exc), show_alert=True)
@@ -1889,6 +2015,12 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     platform_user_id=target_user_id,
                     actor_id=callback.from_user.id,
                     initial_admin_ids=settings.admin_ids,
+                )
+                logger.info(
+                    "[%s] Owner %s removed admin user %s",
+                    settings.bot_platform,
+                    callback.from_user.id,
+                    target_user_id,
                 )
                 await callback.answer("دسترسی مدیر حذف شد.")
             except AdminRoleError as exc:
@@ -1946,6 +2078,13 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     role=role,
                     actor_id=callback.from_user.id,
                     initial_admin_ids=settings.admin_ids,
+                )
+                logger.info(
+                    "[%s] Owner %s added admin user %s with role %s",
+                    settings.bot_platform,
+                    callback.from_user.id,
+                    target_id,
+                    role.value,
                 )
                 await callback.answer("مدیر جدید با موفقیت اضافه شد.")
             except AdminRoleError as exc:
@@ -2046,3 +2185,10 @@ async def send_export(
         title = survey.title
     safe_name = "".join(char for char in title if char.isalnum() or char in " -_")[:60] or "report"
     await target.answer_document(BufferedInputFile(data.read(), filename=f"{safe_name}.xlsx"))
+    logger.info(
+        "[%s] Excel export dispatched for survey_id=%s ('%s') to chat_id=%s",
+        survey.status,
+        survey_id,
+        title,
+        target.chat.id if target.chat else "unknown",
+    )

@@ -1,11 +1,14 @@
 import csv
+import logging
 from io import BytesIO, StringIO
-from pathlib import Path
 from itertools import islice
+from pathlib import Path
 from zipfile import BadZipFile
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
+
+logger = logging.getLogger(__name__)
 
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_IMPORT_ROWS = 1000
@@ -74,7 +77,9 @@ def _records_from_rows(rows: list[list[object]]) -> list[dict[str, object]]:
 
 
 def parse_people_file(filename: str, content: bytes) -> list[dict[str, object]]:
+    logger.info("Parsing people import file '%s' (size=%d bytes)", filename, len(content))
     if len(content) > MAX_IMPORT_BYTES:
+        logger.warning("People import rejected: file '%s' exceeds 5MB size limit", filename)
         raise PeopleImportError("حجم فایل نباید بیشتر از ۵ مگابایت باشد.")
     suffix = Path(filename).suffix.casefold()
     try:
@@ -91,11 +96,25 @@ def parse_people_file(filename: str, content: bytes) -> list[dict[str, object]]:
             rows = list(islice(workbook.active.iter_rows(values_only=True), MAX_IMPORT_ROWS + 2))
             workbook.close()
             if len(rows) > MAX_IMPORT_ROWS + 1:
+                logger.warning("People import rejected: '%s' has more than %d rows", filename, MAX_IMPORT_ROWS)
                 raise PeopleImportError(f"حداکثر {MAX_IMPORT_ROWS} ردیف داده پذیرفته می‌شود.")
         else:
+            logger.warning("People import rejected: unsupported file suffix '%s'", suffix)
             raise PeopleImportError("فقط فایل CSV یا XLSX پذیرفته می‌شود.")
     except (UnicodeDecodeError, csv.Error, OSError, ValueError, BadZipFile, InvalidFileException) as exc:
         if isinstance(exc, PeopleImportError):
             raise
+        logger.warning("People import read error for '%s': %s", filename, exc)
         raise PeopleImportError("خواندن فایل ممکن نشد؛ قالب و encoding آن را بررسی کنید.") from exc
-    return _records_from_rows([list(row) for row in rows])
+
+    records = _records_from_rows([list(row) for row in rows])
+    valid_count = sum(1 for r in records if not r.get("error"))
+    invalid_count = len(records) - valid_count
+    logger.info(
+        "Successfully parsed people import file '%s': total=%d, valid=%d, invalid=%d",
+        filename,
+        len(records),
+        valid_count,
+        invalid_count,
+    )
+    return records

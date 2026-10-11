@@ -1,8 +1,11 @@
+import logging
 from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AuditLog
+
+logger = logging.getLogger(__name__)
 
 # Ensure voter identities and vote scores are NEVER logged in audit records
 FORBIDDEN_AUDIT_KEYS = {"voter_id", "voter_user_id", "voters", "vote_id", "scores"}
@@ -38,6 +41,15 @@ async def record_audit_log(
     )
     session.add(entry)
     await session.commit()
+    logger.info(
+        "[%s] Audit log recorded: actor=%s action=%s target_type=%s target_id=%s details=%s",
+        platform,
+        actor_id,
+        action,
+        target_type,
+        target_id,
+        safe_details,
+    )
     return entry
 
 

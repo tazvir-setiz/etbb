@@ -1,3 +1,4 @@
+import logging
 from io import BytesIO
 
 from openpyxl import Workbook
@@ -7,10 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Person, Survey, SurveyPerson, User, Vote
 
+logger = logging.getLogger(__name__)
+
 
 async def build_survey_workbook(session: AsyncSession, survey_id: int) -> BytesIO:
+    logger.info("Building Excel export workbook for survey_id=%d", survey_id)
     survey = await session.get(Survey, survey_id)
     if survey is None:
+        logger.warning("Excel export failed: survey_id=%d not found", survey_id)
         raise ValueError("نظرسنجی پیدا نشد.")
     votes = await session.execute(
         select(Vote, Person.display_name, User.full_name, User.platform_user_id, User.platform)
@@ -65,4 +70,13 @@ async def build_survey_workbook(session: AsyncSession, survey_id: int) -> BytesI
     output = BytesIO()
     workbook.save(output)
     output.seek(0)
+    logger.info(
+        "Excel export built for survey_id=%d ('%s'): %d total votes, %d voters, %d assigned people (anonymous=%s)",
+        survey_id,
+        survey.title,
+        total_votes,
+        voter_count,
+        len(participant_rows),
+        survey.anonymous,
+    )
     return output

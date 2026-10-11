@@ -1,8 +1,12 @@
+import logging
+
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AdminRole, AdminUser, User
 from app.services.audit import record_audit_log
+
+logger = logging.getLogger(__name__)
 
 
 class AdminRoleError(ValueError):
@@ -25,6 +29,11 @@ async def bootstrap_initial_admins(
     )
     for user_id in initial_admin_ids:
         if user_id not in existing:
+            logger.info(
+                "[%s] Bootstrapping initial admin user %s as OWNER",
+                platform,
+                user_id,
+            )
             session.add(
                 AdminUser(
                     platform=platform,
@@ -127,6 +136,13 @@ async def add_admin_user(
         target_id=str(platform_user_id),
         details={"role": role.value},
     )
+    logger.info(
+        "[%s] Admin user %s added with role '%s' by actor %s",
+        platform,
+        platform_user_id,
+        role.value,
+        actor_id,
+    )
     return new_admin
 
 
@@ -174,6 +190,14 @@ async def update_admin_role(
         target_type="admin_user",
         target_id=str(platform_user_id),
         details={"old_role": old_role, "new_role": new_role.value},
+    )
+    logger.info(
+        "[%s] Admin user %s role changed from '%s' to '%s' by actor %s",
+        platform,
+        platform_user_id,
+        old_role,
+        new_role.value,
+        actor_id,
     )
     return admin
 
@@ -226,4 +250,11 @@ async def remove_admin_user(
         target_type="admin_user",
         target_id=str(platform_user_id),
         details={"removed_role": old_role},
+    )
+    logger.info(
+        "[%s] Admin user %s removed by actor %s (former role: '%s')",
+        platform,
+        platform_user_id,
+        actor_id,
+        old_role,
     )

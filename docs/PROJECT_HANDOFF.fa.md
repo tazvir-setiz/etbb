@@ -116,13 +116,23 @@
 - [x] چرخهٔ کامل پشتیبان‌گیری و بازیابی SQLite و بررسی سلامت داده‌های نظرسنجی و آرا در تست خودکار پیاده‌سازی و اعتبارسنجی شد (`tests/test_operations_and_backup.py`).
 - [x] پایداری ذخیره‌سازی داده در مسیر Volume در راه‌اندازی مجدد موتور دیتابیس آزموده شد.
 
+### زیرساخت لاگ‌های دقیق و توضیحی و رصدپذیری (Observability & Logging) `[x]`
+
+- [x] میدل‌ور ثبت وقایع (`EventLoggingMiddleware`) در `app/bot/middlewares.py` افزوده و روی outer middleware پیام‌ها و callbackها فعال شد؛ زمان پاسخگویی (latency بر حسب میلی‌ثانیه)، نوع رویداد، متن/سند و مشخصات کاربر به تفکیک پلتفرم (`telegram`/`bale`) ثبت می‌شود.
+- [x] لاگ‌های توضیحی در تمام روترهای مدیریتی و کاربری پیاده‌سازی شدند: جریان کامل رأی‌گیری، ثبت نظرات، مشاهده امتیازها، تلاش‌های دسترسی غیرمجاز و رد دسترسی‌ها، مراحل ویزارد افراد و نظرسنجی‌ها، ویرایش‌ها، فعال/غیرفعال‌سازی افراد، لغو نظرسنجی، ورود گروهی و تغییرات نقش مدیران.
+- [x] لاگ‌های ساختاریافته در لایهٔ سرویس‌ها (`voting.py`، `people_import.py`، `admin_drafts.py`، `admin_roles.py`، `audit.py`، `excel.py`) و راه‌اندازی پایگاه داده (`database.py`) تعبیه شدند.
+- [x] قالب استاندارد لاگ‌ها در `app/main.py` یکپارچه‌سازی شد: `%(asctime)s [%(levelname)s] [%(name)s]: %(message)s`.
+- [x] حفظ لاگ‌های سامانه هنگام اجرای migrationهای Alembic با تنظیم `disable_existing_loggers=False` در `migrations/env.py` تثبیت شد.
+- [x] اصل حفظ حریم خصوصی رأی‌دهندگان در لاگ‌ها، وقایع سیستم (`audit_logs`) و خروجی‌ها رعایت شده و شناسه‌های رأی‌دهندگان ناشناس فاش نمی‌شوند.
+- [x] آزمون‌های خودکار ثبت لاگ و میدل‌ور در `tests/test_logging_middleware.py` افزوده شد و تمامی ۴۳ تست خودکار مخزن با موفقیت پاس شدند.
+
 **یادداشت عملیاتی:** در محیط توسعهٔ فعلی CLI ابزار Docker فعال است اما سرویس دیمن Docker Desktop در پس‌زمینه اجرا نبود؛ بنابراین تست کانتینر در سطح Dockerfile/Docker Compose و تست خودکار Python اعتبارسنجی شد. دیتابیس PostgreSQL نیز پس از استقرار در محیط نهایی با تنظیم `DATABASE_URL` قابل اتصال و بهره‌برداری است.
 
 ## وضعیت فنی فعلی و فایل‌های کلیدی
 
-- Routerها: `app/bot/routers/admin.py` و `app/bot/routers/user.py`؛ مدیریت خطای فراگیر در `app/bot/routers/__init__.py`؛ `app/bot/handlers.py` فقط import سازگاری است.
+- Routerها: `app/bot/routers/admin.py` و `app/bot/routers/user.py`؛ مدیریت خطای فراگیر در `app/bot/routers/__init__.py`؛ میدل‌ور لاگ در `app/bot/middlewares.py`.
 - منوها و صفحه‌بندی: `app/bot/keyboards.py`.
-- مدل‌ها: `app/models.py`؛ شروع DB: `app/database.py`؛ تنظیمات: `app/config.py`.
+- مدل‌ها: `app/models.py`؛ شروع DB و migration: `app/database.py`؛ تنظیمات: `app/config.py`.
 - قواعد رأی: `app/services/voting.py`؛ upsert کاربران: `app/services/users.py`؛ پیش‌نویس مدیر: `app/services/admin_drafts.py`.
 - ماژول پارسر تاریخ شمسی و میلادی: `app/services/datetime_parser.py`.
 - Excel: `app/exports/excel.py`.
@@ -130,6 +140,7 @@
 - SQLite پیش‌فرض است؛ PostgreSQL از `DATABASE_URL` پشتیبانی می‌شود.
 - FSM جاری in-memory است و فقط با `/start` از روی `admin_drafts` بازیابی می‌شود؛ رویدادهای جست‌وجو/صفحه‌بندی پیش‌نویس نیستند.
 - سرویس نقش مدیران (`app/services/admin_roles.py`) و ثبت وقایع سیستم (`app/services/audit.py`) همراه با migration دوم Alembic پیاده‌سازی شده‌اند. ویرایش/لغو نظرسنجی از پنل مدیر پشتیبانی می‌شود؛ ویرایش فقط پیش از شروع و پیش از نخستین رأی مجاز است.
+- لاگ‌های سرتاسری سیستم به تفکیک پلتفرم و رویداد ثبت می‌شوند و از روی خروجی لاگ، کلیه کنش‌ها، رخدادها و خطاهای سیستم قابل پیگیری است.
 ## راه‌اندازی و بررسی
 
 روی Windows و از ریشهٔ مخزن:
@@ -143,7 +154,7 @@ python -m app.main
 
 ```powershell
 python -m pytest
-python -m ruff check app tests
+python -m ruff check app tests migrations
 ```
 
 هنگام گزارش وضعیت، تفکیک کنید کدام بررسی واقعاً اجرا شده و کدام فقط پیشنهاد شده است.

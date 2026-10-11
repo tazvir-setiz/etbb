@@ -13,10 +13,19 @@ from app.database import SessionFactory, engine, initialize_database
 logger = logging.getLogger(__name__)
 
 
+LOG_FORMAT = "%(asctime)s [%(levelname)s] [%(name)s]: %(message)s"
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+
 async def check_system() -> bool:
     """Diagnostic self-check for database connection and migration status."""
     settings = get_settings()
-    logging.basicConfig(level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=settings.log_level.upper(),
+        format=LOG_FORMAT,
+        datefmt=LOG_DATEFMT,
+        force=True,
+    )
     logger.info("Running system diagnostics on platform: %s...", settings.bot_platform)
     try:
         await initialize_database()
@@ -34,7 +43,12 @@ async def main() -> None:
             f"BOT_TOKEN is empty. Put your bot token in {ENV_FILE} "
             "(copy .env.example first) or set the BOT_TOKEN environment variable."
         )
-    logging.basicConfig(level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=settings.log_level.upper(),
+        format=LOG_FORMAT,
+        datefmt=LOG_DATEFMT,
+        force=True,
+    )
     logger.info("Starting survey bot on platform: %s (Timezone: %s)", settings.bot_platform, settings.timezone)
     await initialize_database()
     logger.info("Database initialized successfully.")
