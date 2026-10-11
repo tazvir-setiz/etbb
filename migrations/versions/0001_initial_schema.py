@@ -120,7 +120,12 @@ def upgrade() -> None:
         if "telegram_id" in columns and "platform_user_id" not in columns:
             op.alter_column("users", "telegram_id", new_column_name="platform_user_id")
         if bind.dialect.name == "postgresql":
-            op.alter_column("users", "platform_user_id", type_=sa.BigInteger())
+            op.alter_column(
+                "users",
+                "platform_user_id",
+                type_=sa.BigInteger(),
+                postgresql_using="platform_user_id::bigint",
+            )
         bind.execute(text("DROP INDEX IF EXISTS ix_users_telegram_id"))
 
     _create_missing_tables()
