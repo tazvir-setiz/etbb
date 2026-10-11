@@ -69,30 +69,39 @@ For bulk import, open **👥 مدیریت افراد** → **ورود گروهی
 
 Dates can be provided in Gregorian format (e.g., `2026-10-08 09:00` or ISO-8601) or Persian Solar / Shamsi format (e.g., `1405/07/16 09:00` with English or Persian numerals); timestamps without an offset use `TIMEZONE` (default Asia/Tehran). Survey people are database person IDs. Scheduled surveys without votes can be edited from the admin detail view. Scheduled or active surveys can be cancelled after a separate confirmation; existing votes and reports are retained.
 
-## Tests and lint
+## Tests, lint, and operational checks
 
 ```bash
+# Run automated tests and linting:
 python -m pytest
 python -m ruff check app tests
+
+# Run self-check for database connection and Alembic migrations:
+python -m app.main --check
 ```
 
 ## Docker
 
-Create `.env` first, then:
+Create `.env` based on `.env.example`, then run:
 
 ```bash
 docker compose up --build -d
 ```
 
-The compose file mounts `./data`, while the default database URL writes to the container working directory; for persistent SQLite storage set `DATABASE_URL=sqlite+aiosqlite:////data/survey_bot.db` in `.env`. Use PostgreSQL for multi-instance deployments.
+- The `Dockerfile` includes the `/data` directory, migration files, and an automated container `HEALTHCHECK`.
+- The compose file mounts `./data` on the host to `/data` in the container. For persistent SQLite storage in the container, set `DATABASE_URL=sqlite+aiosqlite:////data/survey_bot.db` in `.env`.
+- For multi-instance deployments, configure PostgreSQL (`DATABASE_URL=postgresql+psycopg://user:password@host:5432/dbname`).
 
 ## Excel reports
 
-An administrator runs `/export <survey-id>`. The XLSX contains summary and individual score sheets. Anonymous surveys exclude voter name and Telegram ID from the workbook. Keep report files private; Telegram delivery is restricted to configured administrators.
+An administrator runs `/export <survey-id>`. The XLSX contains summary, individual score, and progress sheets. Anonymous surveys exclude voter identity from the workbook. Keep report files private.
 
 ## Backup and restore
 
-For SQLite, stop the bot and copy the database file. Restore by replacing it while the bot is stopped. For PostgreSQL, use `pg_dump`/`pg_restore`. Keep backups encrypted and access-controlled. Startup runs `alembic upgrade head`; test upgrades against a restored copy before using an existing production database. Do not downgrade the initial baseline; restore a verified backup to roll back.
+- **SQLite Backup:** Stop the bot (`docker compose down` or stop process) and copy the database file (`survey_bot.db`) to a secure location.
+- **SQLite Restore:** While the bot is stopped, replace the database file with your verified backup copy, run `python -m app.main --check` to verify database health, and restart the bot.
+- **PostgreSQL Backup/Restore:** Use standard `pg_dump` and `pg_restore` utilities.
+- **Database Migrations:** The bot automatically runs `alembic upgrade head` on startup. Always test backups on a staging copy before deploying updates to production; if rollback is required, restore your verified backup.
 
 ## Security and limitations
 
