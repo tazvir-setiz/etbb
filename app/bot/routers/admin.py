@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 from math import ceil
-from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -41,6 +40,11 @@ from app.services.admin_roles import (
     update_admin_role,
 )
 from app.services.audit import list_audit_logs, record_audit_log
+from app.services.datetime_parser import (
+    DateTimeParseError,
+    digits_to_ascii as _digits_to_ascii,
+    parse_user_datetime as _parse_datetime,
+)
 from app.services.people_import import PeopleImportError, parse_people_file
 from app.services.users import register_or_update_user
 from app.services.voting import survey_statistics, survey_status
@@ -130,15 +134,6 @@ async def _delete_draft(
     )
 
 
-def _digits_to_ascii(value: str) -> str:
-    return value.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
-
-
-def _parse_datetime(value: str, timezone_name: str) -> datetime:
-    parsed = datetime.fromisoformat(_digits_to_ascii(value.strip()))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
-    return parsed
 
 
 def _as_utc_if_naive(value: datetime) -> datetime:
@@ -1014,8 +1009,10 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
             return
         try:
             starts_at = _parse_datetime(message.text or "", settings.timezone)
-        except (ValueError, KeyError):
-            await message.answer("زمان معتبر نیست. از قالب YYYY-MM-DDTHH:MM:SS استفاده کنید:")
+        except (ValueError, KeyError, DateTimeParseError):
+            await message.answer(
+                "زمان معتبر نیست. می‌توانید از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۰ ۰۹:۰۰) یا میلادی (مثال: 2026-10-15 09:00) استفاده کنید:"
+            )
             return
         await state.update_data(starts_at=starts_at.isoformat())
         await state.set_state(SurveyWizard.ends_at)
@@ -1030,8 +1027,10 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         try:
             ends_at = _parse_datetime(message.text or "", settings.timezone)
             starts_at = datetime.fromisoformat((await state.get_data())["starts_at"])
-        except (ValueError, KeyError):
-            await message.answer("زمان معتبر نیست. از قالب YYYY-MM-DDTHH:MM:SS استفاده کنید:")
+        except (ValueError, KeyError, DateTimeParseError):
+            await message.answer(
+                "زمان معتبر نیست. می‌توانید از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۰ ۰۹:۰۰) یا میلادی (مثال: 2026-10-15 09:00) استفاده کنید:"
+            )
             return
         if ends_at <= starts_at:
             await message.answer("زمان پایان باید بعد از شروع باشد. زمان پایان را دوباره بفرستید:")
@@ -1237,8 +1236,10 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         if value != "/skip":
             try:
                 parsed = _parse_datetime(value, settings.timezone)
-            except (ValueError, KeyError):
-                await message.answer("زمان معتبر نیست؛ قالب YYYY-MM-DDTHH:MM:SS:")
+            except (ValueError, KeyError, DateTimeParseError):
+                await message.answer(
+                    "زمان معتبر نیست. از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۰ ۰۹:۰۰) یا میلادی (مثال: 2026-10-15 09:00) استفاده کنید یا /skip را ارسال کنید:"
+                )
                 return
             await state.update_data(starts_at=parsed.isoformat())
         await state.set_state(SurveyEditFlow.ends_at)
@@ -1254,8 +1255,10 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         if value != "/skip":
             try:
                 parsed = _parse_datetime(value, settings.timezone)
-            except (ValueError, KeyError):
-                await message.answer("زمان معتبر نیست؛ قالب YYYY-MM-DDTHH:MM:SS:")
+            except (ValueError, KeyError, DateTimeParseError):
+                await message.answer(
+                    "زمان معتبر نیست. از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۰ ۰۹:۰۰) یا میلادی (مثال: 2026-10-15 09:00) استفاده کنید یا /skip را ارسال کنید:"
+                )
                 return
             await state.update_data(ends_at=parsed.isoformat())
         data = await state.get_data()
@@ -1746,11 +1749,11 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                     details={"title": title, "people_count": len(people)},
                 )
             await message.answer(f"نظرسنجی ساخته شد. شناسه: {survey_id}")
-        except (ValueError, IndexError):
+        except (ValueError, IndexError, DateTimeParseError):
             await message.answer(
-                "قالب: /addsurvey عنوان|شروع ISO|پایان ISO|شناسه افراد\n"
-                "نمونه: /addsurvey ارزیابی|2026-10-08T09:00:00+03:30|"
-                "2026-10-09T17:00:00+03:30|1,2"
+                "قالب: /addsurvey عنوان|زمان شروع|زمان پایان|شناسه افراد\n"
+                "نمونه شمسی: /addsurvey ارزیابی|1405/07/20 09:00|1405/07/21 17:00|1,2\n"
+                "نمونه میلادی: /addsurvey ارزیابی|2026-10-08 09:00|2026-10-09 17:00|1,2"
             )
 
     @router.callback_query(F.data == "adm:home")

@@ -13,7 +13,7 @@ async def build_survey_workbook(session: AsyncSession, survey_id: int) -> BytesI
     if survey is None:
         raise ValueError("نظرسنجی پیدا نشد.")
     votes = await session.execute(
-        select(Vote, Person.display_name, User.full_name, User.platform_user_id)
+        select(Vote, Person.display_name, User.full_name, User.platform_user_id, User.platform)
         .join(Person, Person.id == Vote.person_id)
         .join(User, User.id == Vote.user_id)
         .where(Vote.survey_id == survey_id)
@@ -48,10 +48,10 @@ async def build_survey_workbook(session: AsyncSession, survey_id: int) -> BytesI
     progress.append(["رأی‌دهندگان یکتا", voter_count])
     for name, count, average in participant_rows:
         summary.append([name, count, float(average or 0)])
-    for vote, person_name, voter_name, voter_id in votes:
+    for vote, person_name, voter_name, voter_id, platform in votes:
         record: list[object] = [person_name, vote.score, vote.comment or "", vote.created_at]
         if not survey.anonymous:
-            record.extend([voter_name, voter_id, vote.user.platform])
+            record.extend([voter_name, voter_id, platform])
         detail.append(record)
     for sheet in workbook.worksheets:
         sheet.freeze_panes = "A2"

@@ -68,7 +68,7 @@ async def record_vote(
         if not survey.allow_vote_editing:
             raise VotingError("شما قبلاً به این فرد امتیاز داده‌اید.")
         existing.score = score
-        existing.comment = comment
+        existing.comment = comment if survey.allow_comments else None
         existing.updated_at = datetime.now(timezone.utc)
         await session.commit()
         await session.refresh(existing)

@@ -67,7 +67,7 @@ For bulk import, open **👥 مدیریت افراد** → **ورود گروهی
 /export 1
 ```
 
-Dates must be ISO-8601; timestamps without an offset use `TIMEZONE`. Survey people are database person IDs. Scheduled surveys without votes can be edited from the admin detail view. Scheduled or active surveys can be cancelled after a separate confirmation; existing votes and reports are retained.
+Dates can be provided in Gregorian format (e.g., `2026-10-08 09:00` or ISO-8601) or Persian Solar / Shamsi format (e.g., `1405/07/16 09:00` with English or Persian numerals); timestamps without an offset use `TIMEZONE` (default Asia/Tehran). Survey people are database person IDs. Scheduled surveys without votes can be edited from the admin detail view. Scheduled or active surveys can be cancelled after a separate confirmation; existing votes and reports are retained.
 
 ## Tests and lint
 
