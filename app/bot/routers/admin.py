@@ -2184,11 +2184,27 @@ async def send_export(
         data = await build_survey_workbook(session, survey_id)
         title = survey.title
     safe_name = "".join(char for char in title if char.isalnum() or char in " -_")[:60] or "report"
-    await target.answer_document(BufferedInputFile(data.read(), filename=f"{safe_name}.xlsx"))
-    logger.info(
-        "[%s] Excel export dispatched for survey_id=%s ('%s') to chat_id=%s",
-        survey.status,
-        survey_id,
-        title,
-        target.chat.id if target.chat else "unknown",
-    )
+    content = data.getvalue()
+    try:
+        await target.answer_document(
+            BufferedInputFile(content, filename=f"{safe_name}.xlsx"),
+            caption=f"📊 خروجی اکسل نظرسنجی «{title}»",
+        )
+        logger.info(
+            "[%s] Excel export dispatched for survey_id=%s ('%s') to chat_id=%s",
+            survey.status,
+            survey_id,
+            title,
+            target.chat.id if target.chat else "unknown",
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to send Excel export for survey_id=%s ('%s') to chat_id=%s: %s",
+            survey_id,
+            title,
+            target.chat.id if target.chat else "unknown",
+            exc,
+            exc_info=True,
+        )
+        await target.answer("❌ خطا در ارسال فایل اکسل به پیام‌رسان. لطفاً دوباره تلاش کنید.")
+

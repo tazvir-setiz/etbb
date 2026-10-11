@@ -3,10 +3,10 @@ import logging
 import sys
 
 from aiogram import Bot, Dispatcher
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 
 from app.bot.routers import build_router
+from app.bot.session import BaleAiohttpSession
 from app.config import ENV_FILE, get_settings
 from app.database import SessionFactory, engine, initialize_database
 
@@ -54,7 +54,7 @@ async def main() -> None:
     logger.info("Database initialized successfully.")
     session = None
     if settings.bot_platform == "bale":
-        session = AiohttpSession(api=TelegramAPIServer.from_base("https://tapi.bale.ai"))
+        session = BaleAiohttpSession(api=TelegramAPIServer.from_base("https://tapi.bale.ai"))
     bot = Bot(settings.bot_token, session=session)
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(SessionFactory, settings))

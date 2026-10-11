@@ -284,8 +284,11 @@ async def test_survey_anonymity_in_excel_export(session_factory):
 
 def test_dual_platform_bot_configuration():
     from aiogram import Bot
-    from aiogram.client.session.aiohttp import AiohttpSession
     from aiogram.client.telegram import TelegramAPIServer
+    from aiogram.methods import SendDocument
+    from aiogram.types import BufferedInputFile
+
+    from app.bot.session import BaleAiohttpSession
 
     dummy_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 
@@ -293,8 +296,89 @@ def test_dual_platform_bot_configuration():
     bot_tg = Bot(token=dummy_token)
     assert "telegram.org" in bot_tg.session.api.base
 
+    # Telegram session uses attach:// indirection
+    doc_method = SendDocument(chat_id=123, document=BufferedInputFile(b"dummy data", filename="report.xlsx"))
+    tg_form = bot_tg.session.build_form_data(bot_tg, doc_method)
+    tg_fields = {f[0]["name"]: f for f in tg_form._fields}
+    assert tg_fields["document"][2].startswith("attach://")
+
     # Bale bot
-    bale_session = AiohttpSession(api=TelegramAPIServer.from_base("https://tapi.bale.ai"))
+    bale_session = BaleAiohttpSession(api=TelegramAPIServer.from_base("https://tapi.bale.ai"))
     bot_bale = Bot(token=dummy_token, session=bale_session)
+    assert isinstance(bot_bale.session, BaleAiohttpSession)
     assert "tapi.bale.ai" in bot_bale.session.api.base
+
+    # Bale session attaches file directly under parameter name 'document'
+    bale_form = bot_bale.session.build_form_data(bot_bale, doc_method)
+    bale_fields = {f[0]["name"]: f for f in bale_form._fields}
+    assert "document" in bale_fields
+    assert bale_fields["document"][0]["filename"] == "report.xlsx"
+    # Ensure attach:// is NOT in the document parameter
+    assert not str(bale_fields["document"][2]).startswith("attach://")
+
+
+@pytest.mark.asyncio
+async def test_send_export_dispatches_buffered_input_file(session_factory):
+    from unittest.mock import AsyncMock, MagicMock
+    from aiogram.types import BufferedInputFile
+    from app.bot.routers.admin import send_export
+
+    async with session_factory() as session:
+        survey = Survey(
+            title="نظرسنجی نمونه",
+            starts_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ends_at=datetime(2026, 12, 31, tzinfo=timezone.utc),
+            status=SurveyStatus.ACTIVE.value,
+        )
+        session.add(survey)
+        await session.commit()
+        s_id = survey.id
+
+    target_mock = MagicMock()
+    target_mock.answer_document = AsyncMock()
+    target_mock.answer = AsyncMock()
+    target_mock.chat.id = 12345
+
+    await send_export(target_mock, session_factory, s_id)
+
+    target_mock.answer_document.assert_awaited_once()
+    args, kwargs = target_mock.answer_document.await_args
+    sent_doc = args[0]
+    assert isinstance(sent_doc, BufferedInputFile)
+    assert sent_doc.filename == "نظرسنجی نمونه.xlsx"
+    assert len(sent_doc.data) > 0
+    assert kwargs.get("caption") == "📊 خروجی اکسل نظرسنجی «نظرسنجی نمونه»"
+
+
+@pytest.mark.asyncio
+async def test_send_export_handles_errors(session_factory):
+    from unittest.mock import AsyncMock, MagicMock
+    from app.bot.routers.admin import send_export
+
+    target_mock = MagicMock()
+    target_mock.answer = AsyncMock()
+    target_mock.chat.id = 12345
+
+    # Non-existent survey
+    await send_export(target_mock, session_factory, 99999)
+    target_mock.answer.assert_awaited_once_with("نظرسنجی پیدا نشد.")
+
+    # Exception during upload
+    async with session_factory() as session:
+        survey = Survey(
+            title="نظرسنجی خطا",
+            starts_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ends_at=datetime(2026, 12, 31, tzinfo=timezone.utc),
+            status=SurveyStatus.ACTIVE.value,
+        )
+        session.add(survey)
+        await session.commit()
+        s_id = survey.id
+
+    target_mock.reset_mock()
+    target_mock.answer_document = AsyncMock(side_effect=RuntimeError("Upload failure"))
+    await send_export(target_mock, session_factory, s_id)
+    target_mock.answer.assert_awaited_once_with("❌ خطا در ارسال فایل اکسل به پیام‌رسان. لطفاً دوباره تلاش کنید.")
+
+
 
