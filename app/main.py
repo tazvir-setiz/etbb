@@ -9,23 +9,15 @@ from app.bot.routers import build_router
 from app.bot.session import BaleAiohttpSession
 from app.config import ENV_FILE, get_settings
 from app.database import SessionFactory, engine, initialize_database
+from app.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
-
-
-LOG_FORMAT = "%(asctime)s [%(levelname)s] [%(name)s]: %(message)s"
-LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 
 async def check_system() -> bool:
     """Diagnostic self-check for database connection and migration status."""
     settings = get_settings()
-    logging.basicConfig(
-        level=settings.log_level.upper(),
-        format=LOG_FORMAT,
-        datefmt=LOG_DATEFMT,
-        force=True,
-    )
+    setup_logging(settings.log_level, settings.log_file)
     logger.info("Running system diagnostics on platform: %s...", settings.bot_platform)
     try:
         await initialize_database()
@@ -43,12 +35,7 @@ async def main() -> None:
             f"BOT_TOKEN is empty. Put your bot token in {ENV_FILE} "
             "(copy .env.example first) or set the BOT_TOKEN environment variable."
         )
-    logging.basicConfig(
-        level=settings.log_level.upper(),
-        format=LOG_FORMAT,
-        datefmt=LOG_DATEFMT,
-        force=True,
-    )
+    setup_logging(settings.log_level, settings.log_file)
     logger.info("Starting survey bot on platform: %s (Timezone: %s)", settings.bot_platform, settings.timezone)
     await initialize_database()
     logger.info("Database initialized successfully.")
@@ -59,6 +46,18 @@ async def main() -> None:
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(SessionFactory, settings))
     try:
+        try:
+            bot_user = await bot.get_me()
+            logger.info(
+                "[%s] Connected to Bot API. Bot user: @%s (id=%s, name='%s')",
+                settings.bot_platform,
+                bot_user.username,
+                bot_user.id,
+                bot_user.first_name,
+            )
+        except Exception as exc:
+            logger.warning("[%s] Could not fetch bot user details at startup: %s", settings.bot_platform, exc)
+        logger.info("[%s] Starting polling...", settings.bot_platform)
         await dispatcher.start_polling(bot)
     finally:
         logger.info("Shutting down bot session and database engine...")

@@ -50,7 +50,7 @@ class EventLoggingMiddleware(BaseMiddleware):
         try:
             result = await handler(event, data)
             duration_ms = (time.perf_counter() - start_time) * 1000
-            logger.debug("[%s] Handled %s for %s in %.1fms", self.platform, event_desc, user_info, duration_ms)
+            logger.info("[%s] Handled %s for %s in %.1fms", self.platform, event_desc, user_info, duration_ms)
             return result
         except Exception as exc:
             duration_ms = (time.perf_counter() - start_time) * 1000

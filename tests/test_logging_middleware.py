@@ -98,3 +98,28 @@ def test_build_router_includes_event_logging_middleware():
 
     assert any(isinstance(mw, EventLoggingMiddleware) for mw in router.message.outer_middleware)
     assert any(isinstance(mw, EventLoggingMiddleware) for mw in router.callback_query.outer_middleware)
+
+
+def test_setup_logging_creates_safe_stream_and_rotating_file(tmp_path):
+    from app.logging_config import SafeStreamHandler, setup_logging
+
+    log_file = tmp_path / "test_bot.log"
+    setup_logging(log_level="INFO", log_file=log_file)
+
+    root = logging.getLogger()
+    assert any(isinstance(h, SafeStreamHandler) for h in root.handlers)
+    assert any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers)
+
+    test_logger = logging.getLogger("app.test")
+    test_msg = "پیام آزمایشی فارسی برای بررسی لاگ سرتاسری"
+    test_logger.info(test_msg)
+
+    # Flush all handlers
+    for h in root.handlers:
+        h.flush()
+
+    assert log_file.exists()
+    content = log_file.read_text(encoding="utf-8")
+    assert test_msg in content
+    assert "[app.test]" in content
+

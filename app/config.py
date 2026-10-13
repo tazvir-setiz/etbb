@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./survey_bot.db"
     timezone: str = "Asia/Tehran"
     log_level: str = "INFO"
+    log_file: str = "logs/bot.log"
 
     model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
