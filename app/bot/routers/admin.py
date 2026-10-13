@@ -1,6 +1,7 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import ceil
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -18,7 +19,15 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.bot.keyboards import admin_menu, inline_options, paginated_options, participant_menu
+from app.bot.keyboards import (
+    admin_menu,
+    datetime_end_keyboard,
+    datetime_start_keyboard,
+    datetime_time_keyboard,
+    inline_options,
+    paginated_options,
+    participant_menu,
+)
 from app.config import Settings
 from app.exports.excel import build_survey_workbook
 from app.models import (
@@ -44,6 +53,11 @@ from app.services.audit import list_audit_logs, record_audit_log
 from app.services.datetime_parser import (
     DateTimeParseError,
     digits_to_ascii as _digits_to_ascii,
+    format_shamsi_date,
+    format_shamsi_datetime,
+    get_system_time_info,
+    parse_flexible_datetime,
+    parse_time_components,
     parse_user_datetime as _parse_datetime,
 )
 from app.services.people_import import PeopleImportError, parse_people_file
@@ -169,9 +183,80 @@ def _with_footer(
 
 async def _send_or_edit(target: Message | CallbackQuery, text: str, reply_markup=None) -> None:
     if isinstance(target, CallbackQuery):
-        await target.message.edit_text(text, reply_markup=reply_markup)
+        try:
+            await target.message.edit_text(text, reply_markup=reply_markup)
+        except Exception:
+            await target.message.answer(text, reply_markup=reply_markup)
     else:
         await target.answer(text, reply_markup=reply_markup)
+
+
+async def _send_start_datetime_prompt(
+    target: Message | CallbackQuery,
+    settings: Settings,
+    *,
+    is_edit: bool = False,
+) -> None:
+    now, time_header = get_system_time_info(settings.timezone)
+    text = (
+        f"{time_header}\n\n"
+        f"📅 **لطفاً زمان شروع نظرسنجی را مشخص کنید:**\n\n"
+        f"شما می‌توانید:\n"
+        f"۱) از دکمه‌های زیر برای انتخاب سریع تاریخ یا ساعت استفاده کنید.\n"
+        f"۲) فقط تاریخ شمسی را بفرستید تا ساعت را جداگانه انتخاب کنید (مثال: ۱۴۰۵/۰۷/۲۱)\n"
+        f"۳) فقط ساعت را بفرستید (مثال: ۰۹:۰۰ یا ۱۴:۳۰)\n"
+        f"۴) یا تاریخ و ساعت را با هم بفرستید (مثال: ۱۴۰۵/۰۷/۲۱ ۰۹:۰۰)"
+    )
+    if is_edit:
+        text += "\n\n💡 برای حفظ زمان شروع فعلی، /skip را بفرستید یا دکمهٔ «بدون تغییر» را بزنید."
+    kb = datetime_start_keyboard(now, is_edit=is_edit)
+    await _send_or_edit(target, text, kb)
+
+
+async def _send_time_prompt(
+    target: Message | CallbackQuery,
+    pending_date: tuple[int, int, int],
+    settings: Settings,
+    *,
+    is_edit: bool = False,
+    is_end: bool = False,
+) -> None:
+    _now, time_header = get_system_time_info(settings.timezone)
+    gy, gm, gd = pending_date
+    shamsi_str = format_shamsi_date(datetime(gy, gm, gd), include_weekday=True)
+    label = "پایان" if is_end else "شروع"
+    text = (
+        f"{time_header}\n\n"
+        f"🗓 **تاریخ انتخابی برای {label}:** {shamsi_str}\n\n"
+        f"⏰ حالا لطفاً **ساعت {label}** را مشخص کنید:\n"
+        f"می‌توانید یکی از ساعت‌های زیر را لمس کنید یا ساعت دلخواه را تایپ کنید (مثال: ۰۹:۰۰ یا ۱۴:۳۰):"
+    )
+    kb = datetime_time_keyboard(is_edit=is_edit, allow_back=True)
+    await _send_or_edit(target, text, kb)
+
+
+async def _send_end_datetime_prompt(
+    target: Message | CallbackQuery,
+    starts_at: datetime,
+    settings: Settings,
+    *,
+    is_edit: bool = False,
+) -> None:
+    _now, time_header = get_system_time_info(settings.timezone)
+    start_shamsi = format_shamsi_datetime(starts_at, include_weekday=True)
+    text = (
+        f"{time_header}\n\n"
+        f"📌 **زمان شروع ثبت‌شده:**\n{start_shamsi}\n\n"
+        f"🏁 **لطفاً زمان پایان نظرسنجی را مشخص کنید:**\n\n"
+        f"شما می‌توانید:\n"
+        f"۱) از دکمه‌های زیر برای مدت‌زمان یا مهلت سریع استفاده کنید.\n"
+        f"۲) تاریخ یا ساعت پایان را بفرستید (مثال: ۱۴۰۵/۰۷/۲۵ یا ۱۸:۰۰)\n"
+        f"۳) یا تاریخ و ساعت پایان را با هم بفرستید (مثال: ۱۴۰۵/۰۷/۲۵ ۱۸:۰۰)"
+    )
+    if is_edit:
+        text += "\n\n💡 برای حفظ زمان پایان فعلی، /skip را بفرستید یا دکمهٔ «بدون تغییر» را بزنید."
+    kb = datetime_end_keyboard(starts_at, is_edit=is_edit)
+    await _send_or_edit(target, text, kb)
 
 
 async def _render_people(
@@ -477,6 +562,21 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                         await message.answer(
                             "برای ادامه، فایل CSV یا XLSX را به‌صورت پیوست بفرستید."
                         )
+                elif draft.step in {SurveyWizard.starts_at.state, SurveyEditFlow.starts_at.state}:
+                    is_edit = draft.step == SurveyEditFlow.starts_at.state
+                    pending = draft.payload.get("pending_date")
+                    if pending:
+                        await _send_time_prompt(message, tuple(pending), settings, is_edit=is_edit, is_end=False)
+                    else:
+                        await _send_start_datetime_prompt(message, settings, is_edit=is_edit)
+                elif draft.step in {SurveyWizard.ends_at.state, SurveyEditFlow.ends_at.state}:
+                    is_edit = draft.step == SurveyEditFlow.ends_at.state
+                    starts_at = datetime.fromisoformat(draft.payload["starts_at"])
+                    pending = draft.payload.get("pending_date")
+                    if pending:
+                        await _send_time_prompt(message, tuple(pending), settings, is_edit=is_edit, is_end=True)
+                    else:
+                        await _send_end_datetime_prompt(message, starts_at, settings, is_edit=is_edit)
                 else:
                     await message.answer(prompts[draft.step])
                 return
@@ -1089,47 +1189,82 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
         if not title or len(title) > 200:
             await message.answer("عنوان باید بین ۱ تا ۲۰۰ نویسه باشد. دوباره بفرستید:")
             return
-        await state.update_data(title=title)
+        await state.update_data(title=title, pending_date=None)
         await state.set_state(SurveyWizard.starts_at)
         await _persist_draft(session_factory, settings, message.from_user.id, state, "survey")
-        await message.answer(
-            "زمان شروع را بفرستید (مثل 2026-10-08T09:00:00؛ زمان بدون منطقهٔ زمانی، به وقت تنظیم‌شدهٔ ربات است):"
-        )
+        await _send_start_datetime_prompt(message, settings, is_edit=False)
 
     @router.message(SurveyWizard.starts_at)
     async def survey_start(message: Message, state: FSMContext) -> None:
         if await reject_message(message):
             await state.clear()
             return
+        text = (message.text or "").strip()
+        data = await state.get_data()
+        pending_date = data.get("pending_date")
+        pending_tuple = tuple(pending_date) if pending_date else None
         try:
-            starts_at = _parse_datetime(message.text or "", settings.timezone)
+            resolved_dt, new_pending = parse_flexible_datetime(
+                text,
+                settings.timezone,
+                pending_date=pending_tuple,
+            )
         except (ValueError, KeyError, DateTimeParseError):
             await message.answer(
-                "زمان معتبر نیست. می‌توانید از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۰ ۰۹:۰۰) یا میلادی (مثال: 2026-10-15 09:00) استفاده کنید:"
+                "زمان معتبر نیست. از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۱) یا ساعت (مثال: ۰۹:۰۰ یا ۱۴:۳۰) استفاده کنید:"
             )
             return
-        await state.update_data(starts_at=starts_at.isoformat())
+
+        if new_pending is not None:
+            await state.update_data(pending_date=list(new_pending))
+            await _persist_draft(session_factory, settings, message.from_user.id, state, "survey")
+            await _send_time_prompt(message, new_pending, settings, is_edit=False, is_end=False)
+            return
+
+        now = datetime.now(ZoneInfo(settings.timezone))
+        if resolved_dt <= now:
+            await message.answer("زمان شروع باید در آینده باشد. لطفاً دوباره تاریخ یا ساعت را بفرستید:")
+            return
+
+        await state.update_data(starts_at=resolved_dt.isoformat(), pending_date=None)
         await state.set_state(SurveyWizard.ends_at)
         await _persist_draft(session_factory, settings, message.from_user.id, state, "survey")
-        await message.answer("زمان پایان را بفرستید:")
+        await _send_end_datetime_prompt(message, resolved_dt, settings, is_edit=False)
 
     @router.message(SurveyWizard.ends_at)
     async def survey_end(message: Message, state: FSMContext) -> None:
         if await reject_message(message):
             await state.clear()
             return
+        text = (message.text or "").strip()
+        data = await state.get_data()
+        starts_at = datetime.fromisoformat(data["starts_at"])
+        pending_date = data.get("pending_date")
+        pending_tuple = tuple(pending_date) if pending_date else None
         try:
-            ends_at = _parse_datetime(message.text or "", settings.timezone)
-            starts_at = datetime.fromisoformat((await state.get_data())["starts_at"])
+            resolved_dt, new_pending = parse_flexible_datetime(
+                text,
+                settings.timezone,
+                base_date=starts_at,
+                pending_date=pending_tuple,
+            )
         except (ValueError, KeyError, DateTimeParseError):
             await message.answer(
-                "زمان معتبر نیست. می‌توانید از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۰ ۰۹:۰۰) یا میلادی (مثال: 2026-10-15 09:00) استفاده کنید:"
+                "زمان معتبر نیست. از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۵) یا ساعت (مثال: ۱۸:۰۰) استفاده کنید:"
             )
             return
-        if ends_at <= starts_at:
+
+        if new_pending is not None:
+            await state.update_data(pending_date=list(new_pending))
+            await _persist_draft(session_factory, settings, message.from_user.id, state, "survey")
+            await _send_time_prompt(message, new_pending, settings, is_edit=False, is_end=True)
+            return
+
+        if resolved_dt <= starts_at:
             await message.answer("زمان پایان باید بعد از شروع باشد. زمان پایان را دوباره بفرستید:")
             return
-        await state.update_data(ends_at=ends_at.isoformat())
+
+        await state.update_data(ends_at=resolved_dt.isoformat(), pending_date=None)
         await state.set_state(SurveyWizard.description)
         await _persist_draft(session_factory, settings, message.from_user.id, state, "survey")
         await message.answer("توضیح اختیاری نظرسنجی را بفرستید یا /skip را ارسال کنید:")
@@ -1318,43 +1453,86 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 await message.answer("توضیح حداکثر ۴۰۰۰ نویسه است:")
                 return
             await state.update_data(description=value or None)
+        await state.update_data(pending_date=None)
         await state.set_state(SurveyEditFlow.starts_at)
         await _persist_draft(session_factory, settings, message.from_user.id, state, "survey_edit")
-        await message.answer("زمان شروع جدید را بفرستید یا /skip:")
+        await _send_start_datetime_prompt(message, settings, is_edit=True)
 
     @router.message(SurveyEditFlow.starts_at)
     async def edit_survey_start(message: Message, state: FSMContext) -> None:
         if await reject_message(message):
             return
         value = (message.text or "").strip()
-        if value != "/skip":
-            try:
-                parsed = _parse_datetime(value, settings.timezone)
-            except (ValueError, KeyError, DateTimeParseError):
-                await message.answer(
-                    "زمان معتبر نیست. از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۰ ۰۹:۰۰) یا میلادی (مثال: 2026-10-15 09:00) استفاده کنید یا /skip را ارسال کنید:"
-                )
-                return
-            await state.update_data(starts_at=parsed.isoformat())
+        data = await state.get_data()
+        if value == "/skip":
+            await state.update_data(pending_date=None)
+            await state.set_state(SurveyEditFlow.ends_at)
+            await _persist_draft(session_factory, settings, message.from_user.id, state, "survey_edit")
+            starts_at = datetime.fromisoformat(data["starts_at"])
+            await _send_end_datetime_prompt(message, starts_at, settings, is_edit=True)
+            return
+
+        pending_date = data.get("pending_date")
+        pending_tuple = tuple(pending_date) if pending_date else None
+        try:
+            resolved_dt, new_pending = parse_flexible_datetime(
+                value,
+                settings.timezone,
+                pending_date=pending_tuple,
+            )
+        except (ValueError, KeyError, DateTimeParseError):
+            await message.answer(
+                "زمان معتبر نیست. از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۱) یا ساعت (مثال: ۰۹:۰۰ یا ۱۴:۳۰) استفاده کنید یا /skip را ارسال کنید:"
+            )
+            return
+
+        if new_pending is not None:
+            await state.update_data(pending_date=list(new_pending))
+            await _persist_draft(session_factory, settings, message.from_user.id, state, "survey_edit")
+            await _send_time_prompt(message, new_pending, settings, is_edit=True, is_end=False)
+            return
+
+        now = datetime.now(ZoneInfo(settings.timezone))
+        if resolved_dt <= now:
+            await message.answer("زمان شروع باید در آینده باشد. لطفاً دوباره بفرستید یا /skip را ارسال کنید:")
+            return
+
+        await state.update_data(starts_at=resolved_dt.isoformat(), pending_date=None)
         await state.set_state(SurveyEditFlow.ends_at)
         await _persist_draft(session_factory, settings, message.from_user.id, state, "survey_edit")
-        await message.answer("زمان پایان جدید را بفرستید یا /skip:")
+        await _send_end_datetime_prompt(message, resolved_dt, settings, is_edit=True)
 
     @router.message(SurveyEditFlow.ends_at)
     async def edit_survey_end(message: Message, state: FSMContext) -> None:
         if await reject_message(message):
             return
-        data = await state.get_data()
         value = (message.text or "").strip()
+        data = await state.get_data()
+        starts_at = datetime.fromisoformat(data["starts_at"])
         if value != "/skip":
+            pending_date = data.get("pending_date")
+            pending_tuple = tuple(pending_date) if pending_date else None
             try:
-                parsed = _parse_datetime(value, settings.timezone)
+                resolved_dt, new_pending = parse_flexible_datetime(
+                    value,
+                    settings.timezone,
+                    base_date=starts_at,
+                    pending_date=pending_tuple,
+                )
             except (ValueError, KeyError, DateTimeParseError):
                 await message.answer(
-                    "زمان معتبر نیست. از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۰ ۰۹:۰۰) یا میلادی (مثال: 2026-10-15 09:00) استفاده کنید یا /skip را ارسال کنید:"
+                    "زمان معتبر نیست. از تاریخ شمسی (مثال: ۱۴۰۵/۰۷/۲۵) یا ساعت (مثال: ۱۸:۰۰) استفاده کنید یا /skip را ارسال کنید:"
                 )
                 return
-            await state.update_data(ends_at=parsed.isoformat())
+
+            if new_pending is not None:
+                await state.update_data(pending_date=list(new_pending))
+                await _persist_draft(session_factory, settings, message.from_user.id, state, "survey_edit")
+                await _send_time_prompt(message, new_pending, settings, is_edit=True, is_end=True)
+                return
+
+            await state.update_data(ends_at=resolved_dt.isoformat())
+
         data = await state.get_data()
         try:
             start, end = (
@@ -1370,9 +1548,209 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 "بازه باید معتبر باشد و شروع در آینده قرار بگیرد. زمان پایان را دوباره بفرستید یا /skip:"
             )
             return
+
+        await state.update_data(pending_date=None)
         await state.set_state(SurveyEditFlow.people)
         await _persist_draft(session_factory, settings, message.from_user.id, state, "survey_edit")
         await _render_survey_edit_people(message, session_factory, state, page=0)
+
+    @router.callback_query(F.data.startswith("adm:dt:"))
+    async def handle_datetime_callback(callback: CallbackQuery, state: FSMContext) -> None:
+        if await reject_callback(callback):
+            return
+        current_state = await state.get_state()
+        if current_state not in {
+            SurveyWizard.starts_at.state,
+            SurveyWizard.ends_at.state,
+            SurveyEditFlow.starts_at.state,
+            SurveyEditFlow.ends_at.state,
+        }:
+            await callback.answer("این دکمه دیگر فعال نیست.", show_alert=True)
+            return
+
+        is_edit = current_state in {SurveyEditFlow.starts_at.state, SurveyEditFlow.ends_at.state}
+        is_start = current_state in {SurveyWizard.starts_at.state, SurveyEditFlow.starts_at.state}
+        draft_type = "survey_edit" if is_edit else "survey"
+        tz = ZoneInfo(settings.timezone)
+        now = datetime.now(tz)
+        action = callback.data.split(":", 2)[2]
+
+        if action == "skip":
+            if not is_edit:
+                await callback.answer()
+                return
+            if is_start:
+                data = await state.get_data()
+                await state.update_data(pending_date=None)
+                await state.set_state(SurveyEditFlow.ends_at)
+                await _persist_draft(session_factory, settings, callback.from_user.id, state, draft_type)
+                starts_at = datetime.fromisoformat(data["starts_at"])
+                await _send_end_datetime_prompt(callback, starts_at, settings, is_edit=True)
+            else:
+                data = await state.get_data()
+                start = datetime.fromisoformat(data["starts_at"])
+                end = datetime.fromisoformat(data["ends_at"])
+                if _as_utc_if_naive(end) <= _as_utc_if_naive(start) or _as_utc_if_naive(start) <= datetime.now(timezone.utc):
+                    await callback.answer("بازهٔ زمانی باید معتبر باشد و شروع در آینده قرار بگیرد.", show_alert=True)
+                    return
+                await state.update_data(pending_date=None)
+                await state.set_state(SurveyEditFlow.people)
+                await _persist_draft(session_factory, settings, callback.from_user.id, state, draft_type)
+                await _render_survey_edit_people(callback, session_factory, state, page=0)
+            await callback.answer()
+            return
+
+        if action == "back_date":
+            await state.update_data(pending_date=None)
+            if is_start:
+                await _send_start_datetime_prompt(callback, settings, is_edit=is_edit)
+            else:
+                data = await state.get_data()
+                starts_at = datetime.fromisoformat(data["starts_at"])
+                await _send_end_datetime_prompt(callback, starts_at, settings, is_edit=is_edit)
+            await callback.answer()
+            return
+
+        if action.startswith("date:"):
+            which_date = action.split(":", 1)[1]
+            if which_date == "today":
+                d_target = now
+            elif which_date == "tomorrow":
+                d_target = now + timedelta(days=1)
+            elif which_date == "dayafter":
+                d_target = now + timedelta(days=2)
+            else:
+                await callback.answer()
+                return
+            pending = (d_target.year, d_target.month, d_target.day)
+            await state.update_data(pending_date=list(pending))
+            await _persist_draft(session_factory, settings, callback.from_user.id, state, draft_type)
+            await _send_time_prompt(callback, pending, settings, is_edit=is_edit, is_end=not is_start)
+            await callback.answer()
+            return
+
+        if action.startswith("quick:"):
+            if not is_start:
+                await callback.answer()
+                return
+            q_type = action.split(":", 1)[1]
+            if q_type == "1h":
+                resolved_dt = now + timedelta(hours=1)
+            elif q_type == "2h":
+                resolved_dt = now + timedelta(hours=2)
+            elif q_type == "tomorrow_9":
+                tom = now + timedelta(days=1)
+                resolved_dt = datetime(tom.year, tom.month, tom.day, 9, 0, tzinfo=tz)
+            else:
+                await callback.answer()
+                return
+
+            await state.update_data(starts_at=resolved_dt.isoformat(), pending_date=None)
+            next_state = SurveyEditFlow.ends_at if is_edit else SurveyWizard.ends_at
+            await state.set_state(next_state)
+            await _persist_draft(session_factory, settings, callback.from_user.id, state, draft_type)
+            await _send_end_datetime_prompt(callback, resolved_dt, settings, is_edit=is_edit)
+            await callback.answer("زمان شروع ثبت شد")
+            return
+
+        if action.startswith("end:"):
+            if is_start:
+                await callback.answer()
+                return
+            data = await state.get_data()
+            starts_at = datetime.fromisoformat(data["starts_at"])
+            end_type = action.split(":", 1)[1]
+            if end_type == "custom_date":
+                await _send_start_datetime_prompt(callback, settings, is_edit=is_edit)
+                await callback.answer()
+                return
+            elif end_type == "2h":
+                resolved_end = starts_at + timedelta(hours=2)
+            elif end_type == "4h":
+                resolved_end = starts_at + timedelta(hours=4)
+            elif end_type == "24h":
+                resolved_end = starts_at + timedelta(hours=24)
+            elif end_type == "sameday_end":
+                resolved_end = datetime(starts_at.year, starts_at.month, starts_at.day, 23, 59, 59, tzinfo=tz)
+                if resolved_end <= starts_at:
+                    resolved_end += timedelta(days=1)
+            elif end_type == "3d":
+                resolved_end = starts_at + timedelta(days=3)
+            elif end_type == "7d":
+                resolved_end = starts_at + timedelta(days=7)
+            else:
+                await callback.answer()
+                return
+
+            await state.update_data(ends_at=resolved_end.isoformat(), pending_date=None)
+            if is_edit:
+                await state.set_state(SurveyEditFlow.people)
+                await _persist_draft(session_factory, settings, callback.from_user.id, state, draft_type)
+                await callback.answer("زمان پایان ثبت شد")
+                await _render_survey_edit_people(callback, session_factory, state, page=0)
+            else:
+                await state.set_state(SurveyWizard.description)
+                await _persist_draft(session_factory, settings, callback.from_user.id, state, draft_type)
+                await callback.answer("زمان پایان ثبت شد")
+                await callback.message.answer("توضیح اختیاری نظرسنجی را بفرستید یا /skip را ارسال کنید:")
+            return
+
+        if action.startswith("time:"):
+            time_str = action.split(":", 1)[1]
+            hour, minute = parse_time_components(time_str)
+            data = await state.get_data()
+            pending_date = data.get("pending_date")
+
+            if is_start:
+                if pending_date:
+                    py, pm, pd = pending_date
+                else:
+                    cand_today = datetime(now.year, now.month, now.day, hour, minute, tzinfo=tz)
+                    if cand_today > now:
+                        py, pm, pd = now.year, now.month, now.day
+                    else:
+                        tom = now + timedelta(days=1)
+                        py, pm, pd = tom.year, tom.month, tom.day
+
+                resolved_dt = datetime(py, pm, pd, hour, minute, tzinfo=tz)
+                if resolved_dt <= now:
+                    await callback.answer("زمان شروع باید در آینده باشد.", show_alert=True)
+                    return
+
+                await state.update_data(starts_at=resolved_dt.isoformat(), pending_date=None)
+                next_state = SurveyEditFlow.ends_at if is_edit else SurveyWizard.ends_at
+                await state.set_state(next_state)
+                await _persist_draft(session_factory, settings, callback.from_user.id, state, draft_type)
+                await _send_end_datetime_prompt(callback, resolved_dt, settings, is_edit=is_edit)
+                await callback.answer("زمان شروع ثبت شد")
+                return
+            else:
+                starts_at = datetime.fromisoformat(data["starts_at"])
+                if pending_date:
+                    py, pm, pd = pending_date
+                    resolved_end = datetime(py, pm, pd, hour, minute, tzinfo=tz)
+                else:
+                    resolved_end = datetime(starts_at.year, starts_at.month, starts_at.day, hour, minute, tzinfo=tz)
+                    if resolved_end <= starts_at:
+                        resolved_end += timedelta(days=1)
+
+                if resolved_end <= starts_at:
+                    await callback.answer("زمان پایان باید بعد از شروع باشد.", show_alert=True)
+                    return
+
+                await state.update_data(ends_at=resolved_end.isoformat(), pending_date=None)
+                if is_edit:
+                    await state.set_state(SurveyEditFlow.people)
+                    await _persist_draft(session_factory, settings, callback.from_user.id, state, draft_type)
+                    await callback.answer("زمان پایان ثبت شد")
+                    await _render_survey_edit_people(callback, session_factory, state, page=0)
+                else:
+                    await state.set_state(SurveyWizard.description)
+                    await _persist_draft(session_factory, settings, callback.from_user.id, state, draft_type)
+                    await callback.answer("زمان پایان ثبت شد")
+                    await callback.message.answer("توضیح اختیاری نظرسنجی را بفرستید یا /skip را ارسال کنید:")
+                return
+
 
     @router.callback_query(F.data.regexp(r"^adm:survey:edit:people:page:\d+$"))
     async def edit_survey_people_page(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1698,9 +2076,11 @@ def build_admin_router(session_factory: async_sessionmaker, settings: Settings) 
                 await session.scalar(select(func.count(Vote.id)).where(Vote.survey_id == survey_id))
                 or 0
             )
+            start_str = format_shamsi_datetime(survey.starts_at, include_weekday=True)
+            end_str = format_shamsi_datetime(survey.ends_at, include_weekday=True)
             details = (
                 f"🗳 {survey.title}\nوضعیت: {_status_label(survey)}\n"
-                f"شروع: {survey.starts_at}\nپایان: {survey.ends_at}\n"
+                f"شروع: {start_str}\nپایان: {end_str}\n"
                 f"افراد: {people_count}\nرأی‌ها: {vote_count}"
             )
             if survey.description:

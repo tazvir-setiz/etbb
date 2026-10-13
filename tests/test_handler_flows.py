@@ -115,3 +115,36 @@ async def test_fallback_router_handlers(session_factory):
             fake_cb.answer.assert_called_with(
                 "این دکمه دیگر فعال نیست. از منو دوباره انتخاب کنید.", show_alert=True
             )
+
+
+def test_datetime_keyboards_structure():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.bot.keyboards import (
+        datetime_end_keyboard,
+        datetime_start_keyboard,
+        datetime_time_keyboard,
+    )
+
+    now = datetime(2026, 10, 13, 10, 0, tzinfo=ZoneInfo("Asia/Tehran"))
+    kb_start = datetime_start_keyboard(now, is_edit=False)
+    callback_data_list = [btn.callback_data for row in kb_start.inline_keyboard for btn in row]
+    assert "adm:dt:date:today" in callback_data_list
+    assert "adm:dt:date:tomorrow" in callback_data_list
+    assert "adm:dt:quick:1h" in callback_data_list
+    assert "adm:dt:quick:tomorrow_9" in callback_data_list
+    assert "adm:cancel" in callback_data_list
+
+    kb_time = datetime_time_keyboard(is_edit=False, allow_back=True)
+    time_callbacks = [btn.callback_data for row in kb_time.inline_keyboard for btn in row]
+    assert "adm:dt:time:08:00" in time_callbacks
+    assert "adm:dt:time:14:00" in time_callbacks
+    assert "adm:dt:back_date" in time_callbacks
+
+    kb_end = datetime_end_keyboard(now, is_edit=False)
+    end_callbacks = [btn.callback_data for row in kb_end.inline_keyboard for btn in row]
+    assert "adm:dt:end:2h" in end_callbacks
+    assert "adm:dt:end:24h" in end_callbacks
+    assert "adm:dt:end:sameday_end" in end_callbacks
+    assert "adm:dt:end:custom_date" in end_callbacks
+
